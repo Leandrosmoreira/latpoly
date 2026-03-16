@@ -242,8 +242,10 @@ async def fetch_book_snapshot(
     bids = book.get("bids", [])
     asks = book.get("asks", [])
 
-    best_bid = float(bids[0]["price"]) if bids else None
-    best_ask = float(asks[0]["price"]) if asks else None
+    # Polymarket CLOB sorts bids ascending (worst→best) and asks descending (worst→best)
+    # So best bid = last bid, best ask = last ask
+    best_bid = float(bids[-1]["price"]) if bids else None
+    best_ask = float(asks[-1]["price"]) if asks else None
 
     return best_bid, best_ask
 

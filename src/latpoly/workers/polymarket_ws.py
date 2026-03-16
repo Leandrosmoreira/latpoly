@@ -56,22 +56,8 @@ async def _load_rest_snapshot(cfg: Config, state: SharedState, market: MarketInf
     )
 
 
-def _handle_price_change(data: dict, state: SharedState) -> None:
-    """Handle price_change event — updates best bid/ask for the token."""
-    pm = state.polymarket
-    market = pm.market
-    asset_id = data.get("asset_id", "")
-    now_ns = time.time_ns()
-
-    changes = data.get("changes", [])
-    # changes is a list of [side, price, size] where side is "BUY" or "SELL"
-    # We track the best from the event if provided
-    # But price_change also sends top-level best bid/ask in some implementations
-
-    # Try direct best_bid/best_ask fields first
-    best_bid = data.get("best_bid")
-    best_ask = data.get("best_ask")
-
+def _update_side(pm, market, asset_id: str, best_bid, best_ask) -> None:
+    """Apply best_bid/best_ask update for a specific asset."""
     if asset_id == market.yes_token_id:
         if best_bid is not None:
             pm.yes_best_bid = float(best_bid)
@@ -89,13 +75,35 @@ def _handle_price_change(data: dict, state: SharedState) -> None:
             pm.mid_no = (pm.no_best_bid + pm.no_best_ask) / 2.0
             pm.spread_no = pm.no_best_ask - pm.no_best_bid
 
+
+def _handle_price_change(data: dict, state: SharedState) -> None:
+    """Handle price_change event — updates best bid/ask for each token.
+
+    Polymarket WS sends price_changes as an array inside the event:
+    {"price_changes": [{"asset_id": "...", "best_bid": "0.67", "best_ask": "0.72", ...}]}
+    """
+    pm = state.polymarket
+    market = pm.market
+    now_ns = time.time_ns()
+
+    # price_changes is an array of per-asset updates
+    for change in data.get("price_changes", []):
+        asset_id = change.get("asset_id", "")
+        best_bid = change.get("best_bid")
+        best_ask = change.get("best_ask")
+        _update_side(pm, market, asset_id, best_bid, best_ask)
+
     pm.ts_local_recv_ns = now_ns
     pm.ts_mono_ns = time.monotonic_ns()
     pm.event_count += 1
 
 
 def _handle_book(data: dict, state: SharedState) -> None:
-    """Handle book snapshot event — consistency reset."""
+    """Handle book snapshot event — consistency reset.
+
+    Polymarket CLOB sorts bids ascending (worst→best) and asks descending (worst→best).
+    So best bid = last bid, best ask = last ask.
+    """
     pm = state.polymarket
     market = pm.market
     asset_id = data.get("asset_id", "")
@@ -104,25 +112,12 @@ def _handle_book(data: dict, state: SharedState) -> None:
     bids = data.get("bids", [])
     asks = data.get("asks", [])
 
-    best_bid = float(bids[0]["price"]) if bids else None
-    best_ask = float(asks[0]["price"]) if asks else None
+    # Bids ascending: last = highest = best bid
+    # Asks descending: last = lowest = best ask
+    best_bid = float(bids[-1]["price"]) if bids else None
+    best_ask = float(asks[-1]["price"]) if asks else None
 
-    if asset_id == market.yes_token_id:
-        if best_bid is not None:
-            pm.yes_best_bid = best_bid
-        if best_ask is not None:
-            pm.yes_best_ask = best_ask
-        if pm.yes_best_bid is not None and pm.yes_best_ask is not None:
-            pm.mid_yes = (pm.yes_best_bid + pm.yes_best_ask) / 2.0
-            pm.spread_yes = pm.yes_best_ask - pm.yes_best_bid
-    elif asset_id == market.no_token_id:
-        if best_bid is not None:
-            pm.no_best_bid = best_bid
-        if best_ask is not None:
-            pm.no_best_ask = best_ask
-        if pm.no_best_bid is not None and pm.no_best_ask is not None:
-            pm.mid_no = (pm.no_best_bid + pm.no_best_ask) / 2.0
-            pm.spread_no = pm.no_best_ask - pm.no_best_bid
+    _update_side(pm, market, asset_id, best_bid, best_ask)
 
     pm.ts_local_recv_ns = now_ns
     pm.ts_mono_ns = time.monotonic_ns()
@@ -270,6 +265,13 @@ async def polymarket_worker(cfg: Config, state: SharedState) -> None:
                     continue
 
             backoff = 0.5  # reset on success
+
+            # Use Binance mid as strike if not extracted from question text
+            # (up/down markets don't have a dollar strike in the title)
+            if market.strike == 0.0 and state.binance.mid is not None:
+                market.strike = round(state.binance.mid, 2)
+                log.info("Strike set from Binance mid: %.2f", market.strike)
+
             state.polymarket.market = market
 
             # Phase B: REST snapshot
