@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Normalized Tick (Phase 1.1)",
+  "description": "Output of the signal worker: fused Binance + Polymarket data with momentum and lag metrics",
+  "type": "object",
+  "properties": {
+    "ts_ns": { "type": "integer", "description": "Tick timestamp in nanoseconds (epoch)" },
+    "ts_wall": { "type": "number", "description": "Tick timestamp in seconds (epoch float)" },
+    "condition_id": { "type": "string", "description": "Polymarket market condition ID" },
+    "strike": { "type": "number", "description": "BTC price at window open (strike)" },
+    "end_ts_ms": { "type": "integer", "description": "Market expiry in ms (epoch)" },
+
+    "mid_binance": { "type": ["number", "null"], "description": "Binance mid price" },
+    "bn_best_bid": { "type": ["number", "null"] },
+    "bn_best_ask": { "type": ["number", "null"] },
+    "bn_last_price": { "type": ["number", "null"] },
+    "bn_last_qty": { "type": ["number", "null"] },
+
+    "pm_yes_best_bid": { "type": ["number", "null"] },
+    "pm_yes_best_ask": { "type": ["number", "null"] },
+    "mid_yes": { "type": ["number", "null"], "description": "Polymarket YES mid" },
+    "pm_no_best_bid": { "type": ["number", "null"] },
+    "pm_no_best_ask": { "type": ["number", "null"] },
+    "mid_no": { "type": ["number", "null"], "description": "Polymarket NO mid" },
+
+    "spread_yes": { "type": ["number", "null"], "description": "YES ask - bid" },
+    "spread_no": { "type": ["number", "null"], "description": "NO ask - bid" },
+
+    "prob_implied": { "type": ["number", "null"], "description": "mid_yes / (mid_yes + mid_no)" },
+    "distance_to_strike": { "type": ["number", "null"], "description": "mid_binance - strike" },
+    "time_to_expiry_ms": { "type": ["number", "null"], "description": "ms until market expiry" },
+
+    "age_binance_ms": { "type": ["number", "null"], "description": "ms since last Binance update" },
+    "age_poly_ms": { "type": ["number", "null"], "description": "ms since last Polymarket update" },
+    "recv_delta_ms": { "type": ["number", "null"], "description": "poly_recv - binance_recv in ms" },
+
+    "delta_price": { "type": ["number", "null"], "description": "prob_implied - theoretical_prob (future)" },
+
+    "ret_1s": { "type": ["number", "null"], "description": "Binance mid return over ~1 second" },
+    "ret_3s": { "type": ["number", "null"], "description": "Binance mid return over ~3 seconds" },
+    "ret_5s": { "type": ["number", "null"], "description": "Binance mid return over ~5 seconds" },
+    "price_velocity": { "type": ["number", "null"], "description": "ret_3s / 3.0 (USD per second)" },
+
+    "bn_move_since_poly": { "type": ["number", "null"], "description": "Binance move since last Polymarket change (lag edge)" },
+
+    "low_liquidity": { "type": "boolean", "description": "True if spread >= 0.90 (artificial book)" }
+  },
+  "required": ["ts_ns", "ts_wall", "condition_id"]
+}
