@@ -60,14 +60,15 @@ def _extract_strike(text: str) -> float:
     """
     # Remove commas and look for dollar amounts
     clean = text.replace(",", "")
-    match = re.search(r"\$?([\d]+(?:\.\d+)?)", clean)
-    if match:
-        try:
-            val = float(match.group(1))
-            if 10_000 < val < 500_000:
-                return val
-        except ValueError:
-            pass
+    # Try $-prefixed first (most reliable), then all numbers
+    for pattern in [r"\$([\d]+(?:\.\d+)?)", r"([\d]+(?:\.\d+)?)"]:
+        for match in re.finditer(pattern, clean):
+            try:
+                val = float(match.group(1))
+                if 10_000 < val < 500_000:
+                    return val
+            except ValueError:
+                continue
     return 0.0
 
 

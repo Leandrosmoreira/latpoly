@@ -306,6 +306,11 @@ def build_normalized_tick(
 
     # Core prices (computed here from raw bid/ask, not relying on W2 pre-computation)
     mid_binance = compute_mid(bn.best_bid, bn.best_ask)
+
+    # Fallback: set strike from Binance mid if still 0.0
+    if mkt.strike == 0.0 and mid_binance is not None:
+        mkt.strike = round(mid_binance, 2)
+        log.info("Strike set from signal worker fallback: %.2f", mkt.strike)
     mid_yes = compute_mid(pm.yes_best_bid, pm.yes_best_ask)
     mid_no = compute_mid(pm.no_best_bid, pm.no_best_ask)
 
@@ -361,7 +366,7 @@ def build_normalized_tick(
         # Market identity
         "condition_id": mkt.condition_id,
         "strike": mkt.strike,
-        "end_ts_ms": int(mkt.end_ts_s * 1000) if mkt.end_ts_s else 0,
+        "end_ts_ms": int(mkt.end_ts_s * 1000) if mkt.end_ts_s else None,
         # Binance
         "mid_binance": _r(mid_binance, 2),
         "bn_best_bid": bn.best_bid,

@@ -114,8 +114,14 @@ def _handle_book(data: dict, state: SharedState) -> None:
 
     # Bids ascending: last = highest = best bid
     # Asks descending: last = lowest = best ask
-    best_bid = float(bids[-1]["price"]) if bids else None
-    best_ask = float(asks[-1]["price"]) if asks else None
+    try:
+        best_bid = float(bids[-1]["price"]) if bids else None
+    except (ValueError, TypeError, KeyError):
+        best_bid = None
+    try:
+        best_ask = float(asks[-1]["price"]) if asks else None
+    except (ValueError, TypeError, KeyError):
+        best_ask = None
 
     _update_side(pm, market, asset_id, best_bid, best_ask)
 
@@ -276,6 +282,18 @@ async def polymarket_worker(cfg: Config, state: SharedState) -> None:
 
             # Phase B: REST snapshot
             await _load_rest_snapshot(cfg, state, market)
+
+            # Retry strike if Binance wasn't ready during discovery
+            # (wait up to 5s for Binance to be ready)
+            if market.strike == 0.0:
+                for _ in range(10):
+                    if state.binance.mid is not None:
+                        market.strike = round(state.binance.mid, 2)
+                        log.info("Strike set from Binance mid (deferred): %.2f", market.strike)
+                        break
+                    await asyncio.sleep(0.5)
+                if market.strike == 0.0:
+                    log.warning("Strike still 0.0 — Binance not ready after 5s")
 
             # Phase C: WebSocket session
             reason = await _run_ws_session(cfg, state, market)

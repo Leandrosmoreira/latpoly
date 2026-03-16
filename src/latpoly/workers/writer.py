@@ -72,6 +72,7 @@ async def writer_worker(
     current_date: str = ""
     session_start_ts: float = 0.0
     batch: list[bytes] = []
+    batch_ticks: list[dict] = []  # keep tick dicts for metadata inspection
     last_flush = time.monotonic()
 
     try:
@@ -81,6 +82,7 @@ async def writer_worker(
                 tick = await asyncio.wait_for(queue.get(), timeout=cfg.writer_batch_timeout)
                 line = orjson.dumps(tick) + b"\n"
                 batch.append(line)
+                batch_ticks.append(tick)
             except asyncio.TimeoutError:
                 pass  # just flush what we have
             except asyncio.CancelledError:
@@ -96,8 +98,8 @@ async def writer_worker(
             if not batch or not should_flush:
                 continue
 
-            # Handle session file rotation
-            cid = tick.get("condition_id", "") if batch else ""
+            # Handle session file rotation (use latest tick in batch)
+            cid = batch_ticks[-1].get("condition_id", "") if batch_ticks else ""
             if cid and cid != current_condition_id:
                 if session_fh:
                     session_fh.close()
@@ -119,13 +121,14 @@ async def writer_worker(
             # Write batch (in thread to avoid blocking)
             lines = batch
             batch = []
+            batch_ticks = []
             last_flush = now
 
             bytes_written = 0
             if session_fh:
                 bytes_written += await asyncio.to_thread(session_fh.write_batch, lines)
             if daily_fh:
-                await asyncio.to_thread(daily_fh.write_batch, lines)
+                bytes_written += await asyncio.to_thread(daily_fh.write_batch, lines)
 
             state.writer_records_written += len(lines)
             state.writer_bytes_written += bytes_written
