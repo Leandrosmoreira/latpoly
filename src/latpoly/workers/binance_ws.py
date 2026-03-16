@@ -49,9 +49,16 @@ def _handle_book_ticker(data: dict, state: SharedState) -> None:
     bn.event_count += 1
 
 
-_HANDLERS = {
+_HANDLERS_BY_EVENT = {
     "trade": _handle_trade,
     "bookTicker": _handle_book_ticker,
+}
+
+# Binance combined stream bookTicker payloads often lack the "e" field,
+# so we also dispatch by stream name suffix.
+_HANDLERS_BY_STREAM = {
+    "@trade": _handle_trade,
+    "@bookTicker": _handle_book_ticker,
 }
 
 
@@ -72,9 +79,15 @@ async def binance_worker(cfg: Config, state: SharedState) -> None:
                 stream_name: str = envelope.get("stream", "")
                 data: dict = envelope.get("data", {})
 
-                # Dispatch: stream name ends with @trade or @bookTicker
+                # Dispatch by "e" field first, fall back to stream name
                 event_type = data.get("e", "")
-                handler = _HANDLERS.get(event_type)
+                handler = _HANDLERS_BY_EVENT.get(event_type)
+                if handler is None:
+                    # bookTicker in combined stream may lack "e" field
+                    for suffix, h in _HANDLERS_BY_STREAM.items():
+                        if stream_name.endswith(suffix):
+                            handler = h
+                            break
                 if handler:
                     handler(data, state)
 

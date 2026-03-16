@@ -210,13 +210,19 @@ async def signal_worker(
     interval = cfg.signal_interval
     log.info("Signal worker starting (interval=%.2fs)", interval)
 
-    # Wait for readiness
+    # Wait for readiness — log what's missing every 5 seconds
+    wait_count = 0
     while not state.shutdown.is_set() and not state.ready:
         await asyncio.sleep(0.5)
-        if state.binance_ready and not state.polymarket_ready:
-            log.debug("Waiting for Polymarket data...")
-        elif state.polymarket_ready and not state.binance_ready:
-            log.debug("Waiting for Binance data...")
+        wait_count += 1
+        if wait_count % 10 == 0:  # every 5 seconds
+            bn_ok = state.binance_ready
+            pm_ok = state.polymarket_ready
+            log.info(
+                "Waiting for readiness: binance=%s (bid=%s) polymarket=%s (yes_bid=%s)",
+                bn_ok, state.binance.best_bid,
+                pm_ok, state.polymarket.yes_best_bid,
+            )
 
     if state.shutdown.is_set():
         return
