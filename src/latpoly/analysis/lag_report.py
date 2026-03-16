@@ -190,19 +190,69 @@ def run_report(ticks: list[dict]) -> None:
                 print(f"    lag_edge: no data")
         print()
 
-    # --- Section 5: Quick sample of recent data ---
+    # --- Section 5: Phase 2 Z-Score distribution ---
+    for label, dataset in [("ALL TICKS", ticks), ("LIQUID ONLY", liquid_ticks)]:
+        print(f"--- {label}: Phase 2 Z-Scores ---")
+        for field in ("zscore_bn_move", "zscore_ret1s", "edge_score"):
+            vals = [v for t in dataset if (v := _extract_float(t, field)) is not None]
+            _print_stats(field, _stats(vals))
+
+        # Z-score threshold counts
+        zs_vals = [v for t in dataset if (v := _extract_float(t, "zscore_bn_move")) is not None]
+        for thresh in (1.5, 2.0, 3.0):
+            hits = sum(1 for v in zs_vals if abs(v) > thresh)
+            pct = 100 * hits / len(zs_vals) if zs_vals else 0
+            print(f"  |zscore_bn_move| > {thresh}: {hits} ({pct:.2f}%)")
+
+        # Edge score threshold counts
+        edge_vals = [v for t in dataset if (v := _extract_float(t, "edge_score")) is not None]
+        for thresh in (10, 25, 50):
+            hits = sum(1 for v in edge_vals if abs(v) > thresh)
+            pct = 100 * hits / len(edge_vals) if edge_vals else 0
+            print(f"  |edge_score| > {thresh}: {hits} ({pct:.2f}%)")
+        print()
+
+    # --- Section 6: Poly reaction time ---
+    for label, dataset in [("ALL TICKS", ticks), ("LIQUID ONLY", liquid_ticks)]:
+        print(f"--- {label}: Poly Reaction Time ---")
+        vals = [v for t in dataset if (v := _extract_float(t, "poly_reaction_ms")) is not None]
+        _print_stats("poly_reaction_ms", _stats(vals))
+        print()
+
+    # --- Section 7: Edge by time bucket ---
+    for label, dataset in [("ALL TICKS", ticks), ("LIQUID ONLY", liquid_ticks)]:
+        print(f"--- {label}: Edge Score by Time Bucket ---")
+        buckets: dict[str, list[float]] = defaultdict(list)
+        for t in dataset:
+            tb = t.get("time_bucket")
+            es = _extract_float(t, "edge_score")
+            if tb and es is not None:
+                buckets[tb].append(es)
+        for bname in [">600s", "600-300s", "300-120s", "120-60s", "<60s"]:
+            vals = buckets.get(bname, [])
+            abs_vals = [abs(v) for v in vals]
+            st = _stats(abs_vals)
+            if st["count"] > 0:
+                print(f"  [{bname}] n={st['count']}  mean={st['mean']:.2f}  p95={st['p95']:.2f}  max={st['max']:.2f}")
+            else:
+                print(f"  [{bname}] no data")
+        print()
+
+    # --- Section 8: Quick sample of recent data ---
     print(f"--- Sample: Last 3 ticks ---")
     for t in ticks[-3:]:
         mid_bn = t.get("mid_binance", "?")
         mid_y = t.get("mid_yes", "?")
         sp_y = t.get("spread_yes", "?")
         r1 = t.get("ret_1s", "?")
-        r3 = t.get("ret_3s", "?")
         lag = t.get("bn_move_since_poly", "?")
+        zs = t.get("zscore_bn_move", "?")
+        es = t.get("edge_score", "?")
+        tb = t.get("time_bucket", "?")
         ll = t.get("low_liquidity", "?")
         ttx = t.get("time_to_expiry_ms")
         ttx_s = f"{ttx/1000:.0f}s" if ttx else "?"
-        print(f"  bn={mid_bn} yes={mid_y} sp={sp_y} r1s={r1} r3s={r3} lag={lag} liq={not ll} ttx={ttx_s}")
+        print(f"  bn={mid_bn} yes={mid_y} lag={lag} zs={zs} edge={es} bucket={tb} liq={not ll} ttx={ttx_s}")
 
     print(f"\n{'='*70}")
     print(f"  Report complete.")

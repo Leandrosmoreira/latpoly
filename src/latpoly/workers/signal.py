@@ -9,12 +9,20 @@ Phase 1.1 additions:
 - price_velocity: smoothed USD/s speed (ret_3s / 3.0)
 - binance_move_since_last_poly_update: lag edge metric
 - low_liquidity: flag for empty/artificial books
+
+Phase 2 additions:
+- zscore_bn_move: EMA-based z-score for lag edge outlier detection
+- zscore_ret1s: EMA-based z-score for momentum outlier detection
+- poly_reaction_ms: time since last Polymarket book change
+- time_bucket: market regime category by time-to-expiry
+- edge_score: composite signal combining lag, momentum, and liquidity
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from collections import deque
 from typing import Optional
@@ -30,6 +38,12 @@ _HISTORY_MAX_AGE_NS = 6_000_000_000  # 6s (keep slightly beyond 5s)
 
 # Spread threshold for low liquidity detection
 _LOW_LIQUIDITY_SPREAD = 0.90
+
+# EMA smoothing factor for z-score computation
+_EMA_ALPHA = 0.05
+
+# Minimum ticks before z-score is considered valid (warmup)
+_ZSCORE_WARMUP = 20
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +298,132 @@ def is_low_liquidity(
 
 
 # ---------------------------------------------------------------------------
+# Phase 2: EMA-based Z-Score tracker (O(1), no arrays)
+# ---------------------------------------------------------------------------
+
+
+class EmaZScore:
+    """Exponentially weighted z-score tracker.
+
+    Uses EMA for mean and variance — O(1) per update, no buffers.
+    Returns None during warmup period (_ZSCORE_WARMUP ticks).
+    """
+
+    __slots__ = ("_mean", "_var", "_count", "_alpha")
+
+    def __init__(self, alpha: float = _EMA_ALPHA) -> None:
+        self._mean: float = 0.0
+        self._var: float = 0.0
+        self._count: int = 0
+        self._alpha = alpha
+
+    def update(self, x: float) -> Optional[float]:
+        """Feed a new value, return z-score (or None during warmup)."""
+        self._count += 1
+
+        if self._count == 1:
+            # First observation: initialize mean, variance unknown
+            self._mean = x
+            self._var = 0.0
+            return None
+
+        # EMA update
+        a = self._alpha
+        delta = x - self._mean
+        self._mean = a * x + (1.0 - a) * self._mean
+        self._var = a * (delta * delta) + (1.0 - a) * self._var
+
+        if self._count < _ZSCORE_WARMUP:
+            return None  # not enough data yet
+
+        std = math.sqrt(self._var) if self._var > 0 else 0.0
+        if std < 1e-10:
+            return 0.0  # no variance = no outlier
+        return delta / std
+
+    def clear(self) -> None:
+        """Reset on market rotation."""
+        self._mean = 0.0
+        self._var = 0.0
+        self._count = 0
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: Time bucket categorization
+# ---------------------------------------------------------------------------
+
+
+def compute_time_bucket(time_to_expiry_ms: Optional[float]) -> Optional[str]:
+    """Categorize market regime by time-to-expiry.
+
+    Near expiry = more urgency = larger lag edges matter more.
+    """
+    if time_to_expiry_ms is None:
+        return None
+    s = time_to_expiry_ms / 1000.0
+    if s > 600:
+        return ">600s"
+    if s > 300:
+        return "600-300s"
+    if s > 120:
+        return "300-120s"
+    if s > 60:
+        return "120-60s"
+    return "<60s"
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: Composite edge score
+# ---------------------------------------------------------------------------
+
+
+def compute_edge_score(
+    bn_move_since_poly: Optional[float],
+    zscore_bn_move: Optional[float],
+    ret_1s: Optional[float],
+    low_liquidity: bool,
+    time_to_expiry_ms: Optional[float],
+) -> Optional[float]:
+    """Composite score combining lag magnitude, z-score, and momentum.
+
+    Higher absolute value = stronger lag edge signal.
+    Returns None if insufficient data. Sign indicates direction.
+
+    Formula:
+        edge = bn_move * (1 + |zscore| * 0.5) * urgency_multiplier
+        - discounted to 0 if low_liquidity (can't trade it)
+        - urgency increases near expiry (last 120s)
+    """
+    if bn_move_since_poly is None:
+        return None
+    if low_liquidity:
+        return 0.0  # can't trade, no edge
+
+    # Base: raw lag
+    edge = bn_move_since_poly
+
+    # Amplify by z-score (outlier = more confident signal)
+    if zscore_bn_move is not None:
+        edge *= (1.0 + abs(zscore_bn_move) * 0.5)
+
+    # Momentum confirmation: same direction = stronger
+    if ret_1s is not None:
+        if (bn_move_since_poly > 0 and ret_1s > 0) or \
+           (bn_move_since_poly < 0 and ret_1s < 0):
+            edge *= 1.2  # momentum confirms lag direction
+
+    # Urgency: near expiry, the edge is more actionable
+    if time_to_expiry_ms is not None:
+        s = time_to_expiry_ms / 1000.0
+        if s < 60:
+            edge *= 1.5  # last minute
+        elif s < 120:
+            edge *= 1.2  # last 2 minutes
+
+    return edge
+
+
+# ---------------------------------------------------------------------------
 # Tick builder — assembles all indicators into the output dict
 # ---------------------------------------------------------------------------
 
@@ -292,6 +432,8 @@ def build_normalized_tick(
     state: SharedState,
     price_history: PriceHistory,
     poly_tracker: PolyChangeTracker,
+    zscore_bn_move: EmaZScore,
+    zscore_ret1s: EmaZScore,
 ) -> dict:
     """Build the normalized tick from SharedState using indicator functions.
 
@@ -355,6 +497,23 @@ def build_normalized_tick(
     # --- Phase 1.1: Low liquidity flag ---
     low_liq = is_low_liquidity(spread_yes, spread_no)
 
+    # --- Phase 2: Z-scores (EMA-based, O(1)) ---
+    zs_bn = zscore_bn_move.update(bn_move_since_poly) if bn_move_since_poly is not None else None
+    zs_r1 = zscore_ret1s.update(ret_1s) if ret_1s is not None else None
+
+    # --- Phase 2: Poly reaction time ---
+    poly_react_ms: Optional[float] = None
+    if poly_tracker.last_change_ts_ns > 0:
+        poly_react_ms = (now_ns - poly_tracker.last_change_ts_ns) / 1e6
+
+    # --- Phase 2: Time bucket ---
+    time_bucket = compute_time_bucket(time_to_expiry_ms)
+
+    # --- Phase 2: Composite edge score ---
+    edge_score = compute_edge_score(
+        bn_move_since_poly, zs_bn, ret_1s, low_liq, time_to_expiry_ms,
+    )
+
     def _r(v: Optional[float], digits: int = 2) -> Optional[float]:
         """Round if not None."""
         return round(v, digits) if v is not None else None
@@ -403,6 +562,14 @@ def build_normalized_tick(
         "bn_move_since_poly": _r(bn_move_since_poly, 2),
         # Phase 1.1: liquidity flag
         "low_liquidity": low_liq,
+        # Phase 2: z-scores
+        "zscore_bn_move": _r(zs_bn, 4),
+        "zscore_ret1s": _r(zs_r1, 4),
+        # Phase 2: poly reaction & regime
+        "poly_reaction_ms": _r(poly_react_ms, 2),
+        "time_bucket": time_bucket,
+        # Phase 2: composite edge
+        "edge_score": _r(edge_score, 4),
     }
 
 
@@ -423,6 +590,10 @@ async def signal_worker(
     # Phase 1.1 state
     price_history = PriceHistory()
     poly_tracker = PolyChangeTracker()
+
+    # Phase 2 state
+    zscore_bn_move = EmaZScore()
+    zscore_ret1s = EmaZScore()
 
     # Wait for readiness — log what's missing every 5 seconds
     wait_count = 0
@@ -454,10 +625,15 @@ async def signal_worker(
             if cid != last_condition_id:
                 price_history.clear()
                 poly_tracker.clear()
+                zscore_bn_move.clear()
+                zscore_ret1s.clear()
                 last_condition_id = cid
                 log.info("Signal worker: market rotated, history cleared")
 
-            tick = build_normalized_tick(state, price_history, poly_tracker)
+            tick = build_normalized_tick(
+                state, price_history, poly_tracker,
+                zscore_bn_move, zscore_ret1s,
+            )
 
             # Enqueue with drop-oldest if full
             try:

@@ -1,14 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Normalized Tick (Phase 1.1)",
-  "description": "Output of the signal worker: fused Binance + Polymarket data with momentum and lag metrics",
+  "title": "Normalized Tick (Phase 2)",
+  "description": "Output of the signal worker: fused Binance + Polymarket data with momentum, lag, and outlier detection metrics",
   "type": "object",
   "properties": {
     "ts_ns": { "type": "integer", "description": "Tick timestamp in nanoseconds (epoch)" },
     "ts_wall": { "type": "number", "description": "Tick timestamp in seconds (epoch float)" },
     "condition_id": { "type": "string", "description": "Polymarket market condition ID" },
     "strike": { "type": "number", "description": "BTC price at window open (strike)" },
-    "end_ts_ms": { "type": "integer", "description": "Market expiry in ms (epoch)" },
+    "end_ts_ms": { "type": ["integer", "null"], "description": "Market expiry in ms (epoch)" },
 
     "mid_binance": { "type": ["number", "null"], "description": "Binance mid price" },
     "bn_best_bid": { "type": ["number", "null"] },
@@ -43,7 +43,13 @@
 
     "bn_move_since_poly": { "type": ["number", "null"], "description": "Binance move since last Polymarket change (lag edge)" },
 
-    "low_liquidity": { "type": "boolean", "description": "True if spread >= 0.90 (artificial book)" }
+    "low_liquidity": { "type": "boolean", "description": "True if spread >= 0.90 (artificial book)" },
+
+    "zscore_bn_move": { "type": ["number", "null"], "description": "EMA z-score of bn_move_since_poly — outlier > 2.0" },
+    "zscore_ret1s": { "type": ["number", "null"], "description": "EMA z-score of ret_1s — momentum outlier > 2.0" },
+    "poly_reaction_ms": { "type": ["number", "null"], "description": "ms since last Polymarket book change" },
+    "time_bucket": { "type": ["string", "null"], "description": "Market regime: >600s, 600-300s, 300-120s, 120-60s, <60s" },
+    "edge_score": { "type": ["number", "null"], "description": "Composite edge signal: lag * zscore * urgency (0 if low_liq)" }
   },
   "required": ["ts_ns", "ts_wall", "condition_id"]
 }
