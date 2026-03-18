@@ -611,6 +611,7 @@ def build_normalized_tick(
 
     # --- Phase 2.1: Book depth metrics ---
     depth_yes = compute_book_depth(pm.yes_asks_levels, pm.yes_bids_levels)
+    depth_no = compute_book_depth(pm.no_asks_levels, pm.no_bids_levels)
 
     def _r(v: Optional[float], digits: int = 2) -> Optional[float]:
         """Round if not None."""
@@ -668,19 +669,32 @@ def build_normalized_tick(
         "time_bucket": time_bucket,
         # Phase 2: composite edge
         "edge_score": _r(edge_score, 4),
-        # Phase 2.1: book depth (YES side — primary trading side)
-        "depth_ask_total": depth_yes.get("depth_ask_total"),
-        "depth_bid_total": depth_yes.get("depth_bid_total"),
-        "depth_ask_levels": depth_yes.get("depth_ask_levels"),
-        "depth_bid_levels": depth_yes.get("depth_bid_levels"),
-        "vwap_ask_100": depth_yes.get("vwap_ask_100"),
-        "slippage_ask_100": depth_yes.get("slippage_ask_100"),
-        "vwap_ask_500": depth_yes.get("vwap_ask_500"),
-        "slippage_ask_500": depth_yes.get("slippage_ask_500"),
-        "vwap_bid_100": depth_yes.get("vwap_bid_100"),
-        "slippage_bid_100": depth_yes.get("slippage_bid_100"),
-        "vwap_bid_500": depth_yes.get("vwap_bid_500"),
-        "slippage_bid_500": depth_yes.get("slippage_bid_500"),
+        # Phase 2.1: book depth YES
+        "yes_depth_ask_total": depth_yes.get("depth_ask_total"),
+        "yes_depth_bid_total": depth_yes.get("depth_bid_total"),
+        "yes_depth_ask_levels": depth_yes.get("depth_ask_levels"),
+        "yes_depth_bid_levels": depth_yes.get("depth_bid_levels"),
+        "yes_vwap_ask_100": depth_yes.get("vwap_ask_100"),
+        "yes_slippage_ask_100": depth_yes.get("slippage_ask_100"),
+        "yes_vwap_ask_500": depth_yes.get("vwap_ask_500"),
+        "yes_slippage_ask_500": depth_yes.get("slippage_ask_500"),
+        "yes_vwap_bid_100": depth_yes.get("vwap_bid_100"),
+        "yes_slippage_bid_100": depth_yes.get("slippage_bid_100"),
+        "yes_vwap_bid_500": depth_yes.get("vwap_bid_500"),
+        "yes_slippage_bid_500": depth_yes.get("slippage_bid_500"),
+        # Phase 2.1: book depth NO
+        "no_depth_ask_total": depth_no.get("depth_ask_total"),
+        "no_depth_bid_total": depth_no.get("depth_bid_total"),
+        "no_depth_ask_levels": depth_no.get("depth_ask_levels"),
+        "no_depth_bid_levels": depth_no.get("depth_bid_levels"),
+        "no_vwap_ask_100": depth_no.get("vwap_ask_100"),
+        "no_slippage_ask_100": depth_no.get("slippage_ask_100"),
+        "no_vwap_ask_500": depth_no.get("vwap_ask_500"),
+        "no_slippage_ask_500": depth_no.get("slippage_ask_500"),
+        "no_vwap_bid_100": depth_no.get("vwap_bid_100"),
+        "no_slippage_bid_100": depth_no.get("slippage_bid_100"),
+        "no_vwap_bid_500": depth_no.get("vwap_bid_500"),
+        "no_slippage_bid_500": depth_no.get("slippage_bid_500"),
     }
 
 
