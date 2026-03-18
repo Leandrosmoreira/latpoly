@@ -332,6 +332,23 @@ class StrategyEngine:
         #                 exit_price=exit_price, size=pos.size, tick_idx=tick_idx,
         #             )
 
+        # --- Exit by stop-loss ---
+        # If current price moved against us by more than stop_loss_per_contract, cut
+        bid_key_sl = f"{'yes' if pos.side == 'YES' else 'no'}_vwap_bid_100"
+        current_bid = tick.get(bid_key_sl)
+        if current_bid is None:
+            current_bid = tick.get(f"pm_{'yes' if pos.side == 'YES' else 'no'}_best_bid")
+        if current_bid is not None:
+            unrealized_loss = pos.entry_price - current_bid  # positive = losing
+            if unrealized_loss >= self.cfg.stop_loss_per_contract:
+                pnl = self._compute_pnl(pos, current_bid, is_maker=False)
+                self._record_trade(pos, current_bid, "STOP_LOSS", pnl, tick_idx)
+                return Signal(
+                    action="EXIT", side=pos.side,
+                    reason=f"stop_loss loss={unrealized_loss:.4f}/contract",
+                    exit_price=current_bid, size=pos.size, tick_idx=tick_idx,
+                )
+
         # --- Exit by timeout ---
         if pos.hold_ticks >= self.cfg.max_hold_ticks:
             bid_key = f"{'yes' if pos.side == 'YES' else 'no'}_vwap_bid_100"

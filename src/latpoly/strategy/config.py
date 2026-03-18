@@ -109,6 +109,11 @@ class StrategyConfig:
     max_hold_ticks: int = field(
         default_factory=lambda: _env_int("LATPOLY_STRAT_MAX_HOLD", 50)
     )
+    # Stop-loss: max loss per contract before forced exit (taker)
+    # $0.03 × 100 contracts = $3.00 max loss per trade
+    stop_loss_per_contract: float = field(
+        default_factory=lambda: _env_float("LATPOLY_STRAT_STOP_LOSS", 0.03)
+    )
     hold_to_expiry_distance: float = field(
         default_factory=lambda: _env_float("LATPOLY_STRAT_HOLD_EXPIRY_DIST", 50.0)
     )
