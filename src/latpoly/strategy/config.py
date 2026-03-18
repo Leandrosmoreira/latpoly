@@ -62,6 +62,16 @@ class StrategyConfig:
         default_factory=lambda: _env_int("LATPOLY_STRAT_MAX_POSITION", 500)
     )
 
+    # --- Probability range filter ---
+    # Only enter when the contract mid is in a responsive zone.
+    # At extremes (< 0.10 or > 0.90) probability barely reacts to BTC moves.
+    min_mid_entry: float = field(
+        default_factory=lambda: _env_float("LATPOLY_STRAT_MIN_MID", 0.15)
+    )
+    max_mid_entry: float = field(
+        default_factory=lambda: _env_float("LATPOLY_STRAT_MAX_MID", 0.85)
+    )
+
     # --- Risk filters ---
     min_distance_to_strike: float = field(
         default_factory=lambda: _env_float("LATPOLY_STRAT_MIN_DIST_STRIKE", 5.0)

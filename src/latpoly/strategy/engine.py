@@ -177,19 +177,26 @@ class StrategyEngine:
         if side == "NO" and ret_1s > -cfg.min_ret_1s_confirm:
             return Signal(action="NONE", side="", reason="momentum_not_confirmed")
 
-        # 8. Spread check
+        # 8. Probability range filter — avoid extreme prices where PM doesn't react
+        mid_key = "mid_yes" if side == "YES" else "mid_no"
+        mid = tick.get(mid_key)
+        if mid is not None:
+            if mid < cfg.min_mid_entry or mid > cfg.max_mid_entry:
+                return Signal(action="NONE", side="", reason=f"mid_out_of_range={mid:.4f}")
+
+        # 9. Spread check
         spread_key = "spread_yes" if side == "YES" else "spread_no"
         spread = tick.get(spread_key)
         if spread is None or spread > cfg.max_spread_entry:
             return Signal(action="NONE", side="", reason="spread_too_wide")
 
-        # 9. Depth check (Phase 2.1 data!)
+        # 10. Depth check (Phase 2.1 data!)
         depth_key = f"{'yes' if side == 'YES' else 'no'}_depth_ask_total"
         depth = tick.get(depth_key)
         if depth is not None and depth < cfg.min_depth_contracts:
             return Signal(action="NONE", side="", reason="insufficient_depth")
 
-        # 10. Compute entry price from VWAP (realistic slippage)
+        # 11. Compute entry price from VWAP (realistic slippage)
         prefix = "yes" if side == "YES" else "no"
         vwap_key = f"{prefix}_vwap_ask_100"
         entry_price = tick.get(vwap_key)
@@ -200,22 +207,28 @@ class StrategyEngine:
         if entry_price is None:
             return Signal(action="NONE", side="", reason="no_ask_price")
 
-        # 11. Compute slippage cost
+        # 12. Compute slippage cost
         slip_key = f"{prefix}_slippage_ask_100"
         slippage = tick.get(slip_key) or 0.0
 
-        # 12. Compute net edge
+        # 13. Compute net edge
         edge_score = tick.get("edge_score")
         if edge_score is None:
             return Signal(action="NONE", side="", reason="no_edge_score")
 
-        # Net edge = theoretical edge in PM price - entry costs
-        # Map BTC lag to PM price movement: ~$0.0005 per $1 BTC move
+        # Probability sensitivity: how much PM mid moves per $1 BTC
+        # Near 0.50 -> max sensitivity (~0.001/$ BTC)
+        # Near 0.10 or 0.90 -> low sensitivity (~0.0002/$ BTC)
+        # Use parabolic: sensitivity = base * 4 * mid * (1 - mid)
+        # At mid=0.50: 4*0.5*0.5 = 1.0x  At mid=0.20: 4*0.2*0.8 = 0.64x
+        prob_sensitivity = 4.0 * mid * (1.0 - mid) if mid is not None else 0.5
+        btc_to_pm_rate = 0.0008 * prob_sensitivity  # ~$0.01 per $12.5 BTC at mid=0.50
+
         bn_move_abs = abs(bn_move)
-        pm_edge_estimate = bn_move_abs * 0.0005
+        pm_edge_estimate = bn_move_abs * btc_to_pm_rate
         net_edge = pm_edge_estimate - slippage - (entry_price * cfg.taker_fee_rate)
 
-        # 13. Time weight
+        # 14. Time weight
         time_weight = self._compute_time_weight(tte_s)
 
         # Adjusted min_net_edge by time weight (more lenient near expiry)
@@ -225,10 +238,10 @@ class StrategyEngine:
                 net_edge=net_edge, time_weight=time_weight,
             )
 
-        # 14. Compute dynamic exit target
-        exit_target = self._compute_exit_target(entry_price, side, bn_move_abs)
+        # 15. Compute dynamic exit target
+        exit_target = self._compute_exit_target(entry_price, side, bn_move_abs, mid)
 
-        # 15. Determine size
+        # 16. Determine size
         size = min(cfg.base_size_contracts, cfg.max_position_contracts)
 
         # --- CREATE POSITION ---
@@ -388,14 +401,17 @@ class StrategyEngine:
         return cfg.time_weight_min + frac * (cfg.time_weight_max - cfg.time_weight_min)
 
     def _compute_exit_target(
-        self, entry_price: float, side: str, bn_move_abs: float
+        self, entry_price: float, side: str, bn_move_abs: float,
+        mid: float | None = None,
     ) -> float:
-        """Dynamic exit target based on magnitude of BTC lag.
+        """Dynamic exit target based on BTC lag magnitude and probability sensitivity.
 
-        Maps BTC dollar move to expected Polymarket probability movement.
-        Data shows: $20 BTC lag -> ~$0.01-0.02 PM, $50 -> ~$0.03-0.05
+        Near mid=0.50 probability is most sensitive to BTC moves.
+        Near extremes (0.10, 0.90) targets are smaller.
         """
-        pm_move = bn_move_abs * 0.0005  # ~$0.01 per $20 lag
+        prob_sensitivity = 4.0 * mid * (1.0 - mid) if mid is not None else 0.5
+        btc_to_pm_rate = 0.0008 * prob_sensitivity
+        pm_move = bn_move_abs * btc_to_pm_rate
         target_profit = pm_move * self.cfg.exit_profit_fraction
         target_profit = max(0.005, min(target_profit, 0.05))  # clamp
         return entry_price + target_profit

@@ -202,6 +202,7 @@ def run_backtest(
     cfg: StrategyConfig | None = None,
     initial_cash: float = 1000.0,
     params: dict | None = None,
+    diagnostics: bool = False,
 ) -> BacktestResult:
     """Run a full backtest over a list of normalized ticks.
 
@@ -210,6 +211,7 @@ def run_backtest(
         cfg: Strategy config. If None, uses defaults (with env overrides).
         initial_cash: Starting virtual cash.
         params: Optional dict of param overrides (for sweep labeling).
+        diagnostics: If True, print rejection reason distribution after run.
 
     Returns:
         BacktestResult with all trades and equity curve.
@@ -221,9 +223,15 @@ def run_backtest(
     portfolio = Portfolio(initial_cash=initial_cash)
 
     last_processed_trade_idx = 0
+    rejection_counts: dict[str, int] = defaultdict(int) if diagnostics else {}
 
     for idx, tick in enumerate(ticks):
         signal = engine.on_tick(tick, idx)
+
+        if diagnostics and signal.action == "NONE":
+            # Extract base reason (strip numeric suffixes like "mid_out_of_range=0.0200")
+            reason = signal.reason.split("=")[0] if "=" in signal.reason else signal.reason
+            rejection_counts[reason] += 1
 
         # On entry: debit cash
         if signal.action in ("BUY_YES", "BUY_NO"):
@@ -234,6 +242,15 @@ def run_backtest(
             trade_data = engine.closed_trades[last_processed_trade_idx]
             portfolio.record_exit(trade_data, ticks)
             last_processed_trade_idx += 1
+
+    if diagnostics and rejection_counts:
+        print(f"\n  --- Signal Rejection Reasons (top 15) ---")
+        sorted_reasons = sorted(rejection_counts.items(), key=lambda x: -x[1])
+        total_none = sum(v for _, v in sorted_reasons)
+        for reason, count in sorted_reasons[:15]:
+            pct = 100.0 * count / total_none
+            print(f"  {reason:30s}  {count:>9,}  ({pct:.1f}%)")
+        print()
 
     return portfolio.summarize(len(ticks), params=params)
 
@@ -457,6 +474,7 @@ def main() -> None:
         sys.exit(0)
 
     do_sweep = "--sweep" in args
+    do_diag = "--diag" in args
     file_args = [a for a in args if not a.startswith("--")]
 
     if not file_args:
@@ -480,8 +498,9 @@ def main() -> None:
         print(f"Running backtest with default config...")
         print(f"  zscore_threshold={cfg.zscore_entry_threshold}  "
               f"entry_window=[{cfg.entry_window_min_s}s, {cfg.entry_window_max_s}s]  "
-              f"min_dist_strike={cfg.min_distance_to_strike}")
-        result = run_backtest(ticks, cfg=cfg)
+              f"min_dist_strike={cfg.min_distance_to_strike}  "
+              f"mid_range=[{cfg.min_mid_entry}, {cfg.max_mid_entry}]")
+        result = run_backtest(ticks, cfg=cfg, diagnostics=do_diag)
         print_backtest_report(result)
 
 
