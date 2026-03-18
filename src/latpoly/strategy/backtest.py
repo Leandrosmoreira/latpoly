@@ -224,6 +224,10 @@ def run_backtest(
 
     last_processed_trade_idx = 0
     rejection_counts: dict[str, int] = defaultdict(int) if diagnostics else {}
+    near_miss_signals: list[dict] = [] if diagnostics else []
+    # Near-miss reasons: late-stage rejections that almost became trades
+    _NEAR_MISS_REASONS = {"mid_out_of_range", "net_edge_too_low", "momentum_not_confirmed",
+                          "spread_too_wide", "insufficient_depth", "no_ask_price"}
 
     for idx, tick in enumerate(ticks):
         signal = engine.on_tick(tick, idx)
@@ -232,6 +236,18 @@ def run_backtest(
             # Extract base reason (strip numeric suffixes like "mid_out_of_range=0.0200")
             reason = signal.reason.split("=")[0] if "=" in signal.reason else signal.reason
             rejection_counts[reason] += 1
+
+            # Capture near-miss details
+            if reason in _NEAR_MISS_REASONS:
+                mid = tick.get("mid_yes") or tick.get("mid_no") or 0
+                near_miss_signals.append({
+                    "reason": signal.reason,
+                    "mid": mid,
+                    "zscore": tick.get("zscore_bn_move") or 0,
+                    "net_edge": signal.net_edge,
+                    "bn_move": tick.get("bn_move_since_poly") or 0,
+                    "tte_s": (tick.get("time_to_expiry_ms") or 0) / 1000.0,
+                })
 
         # On entry: debit cash
         if signal.action in ("BUY_YES", "BUY_NO"):
@@ -252,6 +268,16 @@ def run_backtest(
             print(f"  {reason:30s}  {count:>9,}  ({pct:.1f}%)")
         print()
 
+        # Detailed near-miss analysis: show ticks that got closest to trading
+        near_misses = [s for s in near_miss_signals[-20:]] if near_miss_signals else []
+        if near_misses:
+            print(f"  --- Near-Miss Signals (last {len(near_misses)}) ---")
+            for s in near_misses:
+                print(f"  reason={s['reason']:25s}  mid={s['mid']:.4f}  "
+                      f"zs={s['zscore']:.2f}  edge={s['net_edge']:.6f}  "
+                      f"bn_move={s['bn_move']:.1f}  tte={s['tte_s']:.0f}s")
+            print()
+
     return portfolio.summarize(len(ticks), params=params)
 
 
@@ -259,12 +285,13 @@ def run_backtest(
 # Parameter sweep
 # ---------------------------------------------------------------------------
 
-# Default parameter grid for sweep
+# Default parameter grid for sweep — tuned to the real bottlenecks
 DEFAULT_PARAM_GRID: dict[str, list] = {
-    "zscore_entry_threshold": [1.5, 2.0, 2.5, 3.0],
-    "entry_window_min_s": [15.0, 30.0, 45.0],
-    "min_distance_to_strike": [3.0, 5.0, 10.0],
-    "exit_profit_fraction": [0.3, 0.5, 0.7],
+    "zscore_entry_threshold": [1.0, 1.5, 2.0, 2.5],
+    "min_mid_entry": [0.05, 0.10, 0.15],
+    "max_mid_entry": [0.85, 0.90, 0.95],
+    "min_net_edge": [0.001, 0.003, 0.005],
+    "min_ret_1s_confirm": [0.0, 0.2, 0.5],
 }
 
 
