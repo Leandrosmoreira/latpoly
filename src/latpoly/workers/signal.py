@@ -424,6 +424,101 @@ def compute_edge_score(
 
 
 # ---------------------------------------------------------------------------
+# Phase 2.1: Book depth & VWAP / slippage
+# ---------------------------------------------------------------------------
+
+
+def compute_book_depth(
+    asks_levels: list,
+    bids_levels: list,
+) -> dict:
+    """Compute book depth metrics from order book levels.
+
+    levels are list of (price, size) tuples, best first.
+    Returns dict with depth metrics. All sizes are in contracts.
+    On Polymarket, 1 contract = $1 at settlement.
+    """
+    result: dict = {}
+
+    # Total liquidity available (sum of all sizes)
+    ask_total = sum(s for _, s in asks_levels) if asks_levels else 0.0
+    bid_total = sum(s for _, s in bids_levels) if bids_levels else 0.0
+    result["depth_ask_total"] = round(ask_total, 2) if asks_levels else None
+    result["depth_bid_total"] = round(bid_total, 2) if bids_levels else None
+    result["depth_ask_levels"] = len(asks_levels)
+    result["depth_bid_levels"] = len(bids_levels)
+
+    # VWAP and slippage for target sizes (100 and 500 contracts)
+    for target in (100, 500):
+        vwap_ask, slip_ask = _compute_vwap(asks_levels, target)
+        vwap_bid, slip_bid = _compute_vwap_bid(bids_levels, target)
+        result[f"vwap_ask_{target}"] = round(vwap_ask, 6) if vwap_ask is not None else None
+        result[f"slippage_ask_{target}"] = round(slip_ask, 6) if slip_ask is not None else None
+        result[f"vwap_bid_{target}"] = round(vwap_bid, 6) if vwap_bid is not None else None
+        result[f"slippage_bid_{target}"] = round(slip_bid, 6) if slip_bid is not None else None
+
+    return result
+
+
+def _compute_vwap(
+    levels: list, target_size: float
+) -> tuple[Optional[float], Optional[float]]:
+    """VWAP for buying target_size contracts from ask side.
+
+    Returns (vwap, slippage_vs_best_ask) or (None, None) if insufficient depth.
+    """
+    if not levels:
+        return None, None
+
+    filled = 0.0
+    cost = 0.0
+    best_price = levels[0][0]
+
+    for price, size in levels:
+        take = min(size, target_size - filled)
+        cost += take * price
+        filled += take
+        if filled >= target_size:
+            break
+
+    if filled < target_size:
+        return None, None  # not enough liquidity
+
+    vwap = cost / filled
+    slippage = vwap - best_price  # positive = worse than best ask
+    return vwap, slippage
+
+
+def _compute_vwap_bid(
+    levels: list, target_size: float
+) -> tuple[Optional[float], Optional[float]]:
+    """VWAP for selling target_size contracts into bid side.
+
+    Returns (vwap, slippage_vs_best_bid) or (None, None) if insufficient depth.
+    """
+    if not levels:
+        return None, None
+
+    filled = 0.0
+    revenue = 0.0
+    best_price = levels[0][0]
+
+    for price, size in levels:
+        take = min(size, target_size - filled)
+        revenue += take * price
+        filled += take
+        if filled >= target_size:
+            break
+
+    if filled < target_size:
+        return None, None
+
+    vwap = revenue / filled
+    slippage = best_price - vwap  # positive = worse than best bid
+    return vwap, slippage
+
+
+# ---------------------------------------------------------------------------
 # Tick builder — assembles all indicators into the output dict
 # ---------------------------------------------------------------------------
 
@@ -514,6 +609,9 @@ def build_normalized_tick(
         bn_move_since_poly, zs_bn, ret_1s, low_liq, time_to_expiry_ms,
     )
 
+    # --- Phase 2.1: Book depth metrics ---
+    depth_yes = compute_book_depth(pm.yes_asks_levels, pm.yes_bids_levels)
+
     def _r(v: Optional[float], digits: int = 2) -> Optional[float]:
         """Round if not None."""
         return round(v, digits) if v is not None else None
@@ -570,6 +668,19 @@ def build_normalized_tick(
         "time_bucket": time_bucket,
         # Phase 2: composite edge
         "edge_score": _r(edge_score, 4),
+        # Phase 2.1: book depth (YES side — primary trading side)
+        "depth_ask_total": depth_yes.get("depth_ask_total"),
+        "depth_bid_total": depth_yes.get("depth_bid_total"),
+        "depth_ask_levels": depth_yes.get("depth_ask_levels"),
+        "depth_bid_levels": depth_yes.get("depth_bid_levels"),
+        "vwap_ask_100": depth_yes.get("vwap_ask_100"),
+        "slippage_ask_100": depth_yes.get("slippage_ask_100"),
+        "vwap_ask_500": depth_yes.get("vwap_ask_500"),
+        "slippage_ask_500": depth_yes.get("slippage_ask_500"),
+        "vwap_bid_100": depth_yes.get("vwap_bid_100"),
+        "slippage_bid_100": depth_yes.get("slippage_bid_100"),
+        "vwap_bid_500": depth_yes.get("vwap_bid_500"),
+        "slippage_bid_500": depth_yes.get("slippage_bid_500"),
     }
 
 

@@ -60,6 +60,12 @@ class PolymarketState:
     last_trade_price_yes: Optional[float] = None
     last_trade_price_no: Optional[float] = None
 
+    # Book depth: list of (price, size) tuples, best first (max 10 levels)
+    yes_bids_levels: list = field(default_factory=list)
+    yes_asks_levels: list = field(default_factory=list)
+    no_bids_levels: list = field(default_factory=list)
+    no_asks_levels: list = field(default_factory=list)
+
     # Timestamps
     ts_local_recv_ns: int = 0
     ts_mono_ns: int = 0

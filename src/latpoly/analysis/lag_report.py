@@ -238,7 +238,50 @@ def run_report(ticks: list[dict]) -> None:
                 print(f"  [{bname}] no data")
         print()
 
-    # --- Section 8: Quick sample of recent data ---
+    # --- Section 8: Book depth analysis ---
+    for label, dataset in [("ALL TICKS", ticks), ("LIQUID ONLY", liquid_ticks)]:
+        print(f"--- {label}: Book Depth (YES side) ---")
+        for field in ("depth_ask_total", "depth_bid_total", "depth_ask_levels", "depth_bid_levels"):
+            vals = [v for t in dataset if (v := _extract_float(t, field)) is not None]
+            _print_stats(field, _stats(vals))
+
+        for field in ("slippage_ask_100", "slippage_ask_500", "slippage_bid_100", "slippage_bid_500"):
+            vals = [v for t in dataset if (v := _extract_float(t, field)) is not None]
+            _print_stats(field, _stats(vals))
+
+        # How often can we fill 100/500 contracts?
+        total_d = len(dataset)
+        for target in (100, 500):
+            fillable = sum(1 for t in dataset if t.get(f"vwap_ask_{target}") is not None)
+            pct = 100 * fillable / total_d if total_d else 0
+            print(f"  Can fill {target} contracts (ask): {fillable}/{total_d} ({pct:.1f}%)")
+        print()
+
+    # --- Section 9: Depth by edge size ---
+    for label, dataset in [("ALL TICKS", ticks), ("LIQUID ONLY", liquid_ticks)]:
+        print(f"--- {label}: Depth when Edge > Threshold ---")
+        for threshold in (10, 20, 50):
+            edge_ticks = [
+                t for t in dataset
+                if (v := _extract_float(t, "bn_move_since_poly")) is not None and abs(v) > threshold
+            ]
+            if not edge_ticks:
+                print(f"  |edge| > {threshold}: no ticks")
+                continue
+            ask_totals = [v for t in edge_ticks if (v := _extract_float(t, "depth_ask_total")) is not None]
+            slip_100 = [v for t in edge_ticks if (v := _extract_float(t, "slippage_ask_100")) is not None]
+            st_depth = _stats(ask_totals)
+            st_slip = _stats(slip_100)
+            fillable_100 = sum(1 for t in edge_ticks if t.get("vwap_ask_100") is not None)
+            print(f"  |edge| > {threshold}: n={len(edge_ticks)}")
+            if st_depth["count"] > 0:
+                print(f"    depth_ask: mean={st_depth['mean']:.0f}  median={st_depth['median']:.0f}  p25={_percentile(sorted(ask_totals), 25):.0f}")
+            if st_slip["count"] > 0:
+                print(f"    slippage_100: mean={st_slip['mean']:.6f}  p95={st_slip['p95']:.6f}")
+            print(f"    can fill 100: {fillable_100}/{len(edge_ticks)} ({100*fillable_100/len(edge_ticks):.1f}%)")
+        print()
+
+    # --- Section 10: Quick sample of recent data ---
     print(f"--- Sample: Last 3 ticks ---")
     for t in ticks[-3:]:
         mid_bn = t.get("mid_binance", "?")

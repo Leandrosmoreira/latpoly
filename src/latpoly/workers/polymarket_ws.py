@@ -24,8 +24,12 @@ async def _load_rest_snapshot(cfg: Config, state: SharedState, market: MarketInf
     """Fetch REST book snapshot for YES and NO tokens and update state."""
     log.info("Fetching REST snapshot for market %s", market.condition_id[:12])
 
-    yes_bid, yes_ask = await fetch_book_snapshot(cfg.poly_rest_url, market.yes_token_id)
-    no_bid, no_ask = await fetch_book_snapshot(cfg.poly_rest_url, market.no_token_id)
+    yes_bid, yes_ask, yes_bids_lvl, yes_asks_lvl = await fetch_book_snapshot(
+        cfg.poly_rest_url, market.yes_token_id
+    )
+    no_bid, no_ask, no_bids_lvl, no_asks_lvl = await fetch_book_snapshot(
+        cfg.poly_rest_url, market.no_token_id
+    )
 
     pm = state.polymarket
     now_ns = time.time_ns()
@@ -39,6 +43,12 @@ async def _load_rest_snapshot(cfg: Config, state: SharedState, market: MarketInf
     if no_ask is not None:
         pm.no_best_ask = no_ask
 
+    # Store book depth levels
+    pm.yes_bids_levels = yes_bids_lvl
+    pm.yes_asks_levels = yes_asks_lvl
+    pm.no_bids_levels = no_bids_lvl
+    pm.no_asks_levels = no_asks_lvl
+
     # Compute mids and spreads
     if pm.yes_best_bid is not None and pm.yes_best_ask is not None:
         pm.mid_yes = (pm.yes_best_bid + pm.yes_best_ask) / 2.0
@@ -51,8 +61,9 @@ async def _load_rest_snapshot(cfg: Config, state: SharedState, market: MarketInf
     pm.ts_mono_ns = time.monotonic_ns()
 
     log.info(
-        "REST snapshot: YES bid=%.4f ask=%.4f | NO bid=%.4f ask=%.4f",
-        yes_bid or 0, yes_ask or 0, no_bid or 0, no_ask or 0,
+        "REST snapshot: YES bid=%.4f ask=%.4f (%d lvls) | NO bid=%.4f ask=%.4f (%d lvls)",
+        yes_bid or 0, yes_ask or 0, len(yes_asks_lvl),
+        no_bid or 0, no_ask or 0, len(no_asks_lvl),
     )
 
 
@@ -124,6 +135,27 @@ def _handle_book(data: dict, state: SharedState) -> None:
         best_ask = None
 
     _update_side(pm, market, asset_id, best_bid, best_ask)
+
+    # Store full book depth levels (reversed: best first, top 10)
+    bids_levels = []
+    for entry in reversed(bids):
+        try:
+            bids_levels.append((float(entry["price"]), float(entry["size"])))
+        except (ValueError, TypeError, KeyError):
+            continue
+    asks_levels = []
+    for entry in reversed(asks):
+        try:
+            asks_levels.append((float(entry["price"]), float(entry["size"])))
+        except (ValueError, TypeError, KeyError):
+            continue
+
+    if asset_id == market.yes_token_id:
+        pm.yes_bids_levels = bids_levels[:10]
+        pm.yes_asks_levels = asks_levels[:10]
+    elif asset_id == market.no_token_id:
+        pm.no_bids_levels = bids_levels[:10]
+        pm.no_asks_levels = asks_levels[:10]
 
     pm.ts_local_recv_ns = now_ns
     pm.ts_mono_ns = time.monotonic_ns()

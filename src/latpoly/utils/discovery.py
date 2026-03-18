@@ -219,10 +219,11 @@ def _parse_event(event: dict, slug: str) -> Optional[MarketInfo]:
 async def fetch_book_snapshot(
     clob_url: str,
     token_id: str,
-) -> tuple[Optional[float], Optional[float]]:
-    """Fetch current best bid/ask from CLOB REST API.
+) -> tuple[Optional[float], Optional[float], list, list]:
+    """Fetch current best bid/ask and full book depth from CLOB REST API.
 
-    Returns (best_bid, best_ask) or (None, None) on failure.
+    Returns (best_bid, best_ask, bids_levels, asks_levels).
+    bids_levels/asks_levels are lists of (price, size) tuples, best first.
     """
     async with aiohttp.ClientSession() as session:
         try:
@@ -233,12 +234,12 @@ async def fetch_book_snapshot(
             ) as resp:
                 if resp.status != 200:
                     log.warning("CLOB book API returned %d for %s", resp.status, token_id[:12])
-                    return None, None
+                    return None, None, [], []
                 raw = await resp.read()
                 book = orjson.loads(raw)
         except Exception:
             log.exception("Failed to fetch book for %s", token_id[:12])
-            return None, None
+            return None, None, [], []
 
     bids = book.get("bids", [])
     asks = book.get("asks", [])
@@ -248,6 +249,20 @@ async def fetch_book_snapshot(
     best_bid = float(bids[-1]["price"]) if bids else None
     best_ask = float(asks[-1]["price"]) if asks else None
 
-    return best_bid, best_ask
+    # Parse all levels, reverse so best is first, keep top 10
+    bids_levels = []
+    for entry in reversed(bids):
+        try:
+            bids_levels.append((float(entry["price"]), float(entry["size"])))
+        except (ValueError, TypeError, KeyError):
+            continue
+    asks_levels = []
+    for entry in reversed(asks):
+        try:
+            asks_levels.append((float(entry["price"]), float(entry["size"])))
+        except (ValueError, TypeError, KeyError):
+            continue
+
+    return best_bid, best_ask, bids_levels[:10], asks_levels[:10]
 
 
