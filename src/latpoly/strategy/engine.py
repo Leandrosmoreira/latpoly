@@ -311,25 +311,26 @@ class StrategyEngine:
                     exit_price=exit_price, size=pos.size, tick_idx=tick_idx,
                 )
 
-        # --- Exit by reversal ---
-        zscore = tick.get("zscore_bn_move")
-        if zscore is not None:
-            if (pos.side == "YES" and zscore < -1.5) or \
-               (pos.side == "NO" and zscore > 1.5):
-                # Exit at bid (taker)
-                bid_key = f"{'yes' if pos.side == 'YES' else 'no'}_vwap_bid_100"
-                exit_price = tick.get(bid_key)
-                if exit_price is None:
-                    bid_key2 = f"pm_{'yes' if pos.side == 'YES' else 'no'}_best_bid"
-                    exit_price = tick.get(bid_key2)
-                if exit_price is not None:
-                    pnl = self._compute_pnl(pos, exit_price, is_maker=False)
-                    self._record_trade(pos, exit_price, "REVERSAL", pnl, tick_idx)
-                    return Signal(
-                        action="EXIT", side=pos.side,
-                        reason=f"reversal zs={zscore:.2f}",
-                        exit_price=exit_price, size=pos.size, tick_idx=tick_idx,
-                    )
+        # --- Exit by reversal --- DISABLED: data shows reversals destroy profit
+        # 2 reversal trades lost $11.57 vs 69 maker trades that gained $14.79
+        # Keeping MAKER + TIMEOUT only until more data validates a better threshold
+        # zscore = tick.get("zscore_bn_move")
+        # if zscore is not None:
+        #     if (pos.side == "YES" and zscore < -1.5) or \
+        #        (pos.side == "NO" and zscore > 1.5):
+        #         bid_key = f"{'yes' if pos.side == 'YES' else 'no'}_vwap_bid_100"
+        #         exit_price = tick.get(bid_key)
+        #         if exit_price is None:
+        #             bid_key2 = f"pm_{'yes' if pos.side == 'YES' else 'no'}_best_bid"
+        #             exit_price = tick.get(bid_key2)
+        #         if exit_price is not None:
+        #             pnl = self._compute_pnl(pos, exit_price, is_maker=False)
+        #             self._record_trade(pos, exit_price, "REVERSAL", pnl, tick_idx)
+        #             return Signal(
+        #                 action="EXIT", side=pos.side,
+        #                 reason=f"reversal zs={zscore:.2f}",
+        #                 exit_price=exit_price, size=pos.size, tick_idx=tick_idx,
+        #             )
 
         # --- Exit by timeout ---
         if pos.hold_ticks >= self.cfg.max_hold_ticks:
