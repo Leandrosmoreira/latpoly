@@ -168,7 +168,12 @@ class StrategyEngine:
         else:
             return Signal(action="NONE", side="", reason="zscore_below_threshold")
 
-        # 7. Momentum confirmation
+        # 7a. Minimum BTC move filter — small moves never cover the fee
+        bn_move_abs = abs(bn_move)
+        if bn_move_abs < cfg.min_bn_move_abs:
+            return Signal(action="NONE", side="", reason="bn_move_too_small")
+
+        # 7b. Momentum confirmation
         ret_1s = tick.get("ret_1s")
         if ret_1s is None:
             return Signal(action="NONE", side="", reason="no_ret1s")
@@ -222,9 +227,8 @@ class StrategyEngine:
         # Use parabolic: sensitivity = base * 4 * mid * (1 - mid)
         # At mid=0.50: 4*0.5*0.5 = 1.0x  At mid=0.20: 4*0.2*0.8 = 0.64x
         prob_sensitivity = 4.0 * mid * (1.0 - mid) if mid is not None else 0.5
-        btc_to_pm_rate = 0.0008 * prob_sensitivity  # ~$0.01 per $12.5 BTC at mid=0.50
+        btc_to_pm_rate = cfg.btc_to_pm_base_rate * prob_sensitivity
 
-        bn_move_abs = abs(bn_move)
         pm_edge_estimate = bn_move_abs * btc_to_pm_rate
         net_edge = pm_edge_estimate - slippage - (entry_price * cfg.taker_fee_rate)
 
@@ -410,7 +414,7 @@ class StrategyEngine:
         Near extremes (0.10, 0.90) targets are smaller.
         """
         prob_sensitivity = 4.0 * mid * (1.0 - mid) if mid is not None else 0.5
-        btc_to_pm_rate = 0.0008 * prob_sensitivity
+        btc_to_pm_rate = self.cfg.btc_to_pm_base_rate * prob_sensitivity
         pm_move = bn_move_abs * btc_to_pm_rate
         target_profit = pm_move * self.cfg.exit_profit_fraction
         target_profit = max(0.005, min(target_profit, 0.05))  # clamp

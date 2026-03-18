@@ -227,7 +227,8 @@ def run_backtest(
     near_miss_signals: list[dict] = [] if diagnostics else []
     # Near-miss reasons: late-stage rejections that almost became trades
     _NEAR_MISS_REASONS = {"mid_out_of_range", "net_edge_too_low", "momentum_not_confirmed",
-                          "spread_too_wide", "insufficient_depth", "no_ask_price"}
+                          "spread_too_wide", "insufficient_depth", "no_ask_price",
+                          "bn_move_too_small"}
 
     for idx, tick in enumerate(ticks):
         signal = engine.on_tick(tick, idx)
@@ -285,14 +286,16 @@ def run_backtest(
 # Parameter sweep
 # ---------------------------------------------------------------------------
 
-# Default parameter grid for sweep — tuned to the real bottlenecks
+# Default parameter grid for sweep — targets the real bottlenecks identified
+# from diagnostic data (fee vs edge at different mid levels)
 DEFAULT_PARAM_GRID: dict[str, list] = {
-    "zscore_entry_threshold": [1.0, 1.5, 2.0, 2.5],
-    "min_mid_entry": [0.05, 0.10, 0.15],
-    "max_mid_entry": [0.85, 0.90, 0.95],
-    "min_net_edge": [0.001, 0.003, 0.005],
-    "min_ret_1s_confirm": [0.0, 0.2, 0.5],
+    "btc_to_pm_base_rate": [0.0008, 0.0012, 0.0016, 0.0020],
+    "zscore_entry_threshold": [1.0, 1.5, 2.0],
+    "max_mid_entry": [0.40, 0.55, 0.70, 0.85],
+    "min_bn_move_abs": [2.0, 4.0, 6.0],
+    "min_ret_1s_confirm": [0.0, 0.2],
 }
+# = 4 x 3 x 4 x 3 x 2 = 288 combos
 
 
 def _make_config_with_overrides(overrides: dict) -> StrategyConfig:

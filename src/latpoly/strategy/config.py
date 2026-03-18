@@ -72,6 +72,14 @@ class StrategyConfig:
         default_factory=lambda: _env_float("LATPOLY_STRAT_MAX_MID", 0.85)
     )
 
+    # --- BTC-to-PM rate (calibrate with calibrate_rate.py!) ---
+    btc_to_pm_base_rate: float = field(
+        default_factory=lambda: _env_float("LATPOLY_STRAT_BTC_PM_RATE", 0.0008)
+    )
+    min_bn_move_abs: float = field(
+        default_factory=lambda: _env_float("LATPOLY_STRAT_MIN_BN_MOVE", 4.0)
+    )
+
     # --- Risk filters ---
     min_distance_to_strike: float = field(
         default_factory=lambda: _env_float("LATPOLY_STRAT_MIN_DIST_STRIKE", 5.0)
