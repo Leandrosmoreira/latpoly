@@ -43,7 +43,7 @@ class StrategyConfig:
         default_factory=lambda: _env_float("LATPOLY_STRAT_ZSCORE_THRESHOLD", 2.0)
     )
     min_ret_1s_confirm: float = field(
-        default_factory=lambda: _env_float("LATPOLY_STRAT_MIN_RET1S", 0.5)
+        default_factory=lambda: _env_float("LATPOLY_STRAT_MIN_RET1S", 0.0)  # sweep: irrelevant
     )
 
     # --- Spread / liquidity ---
@@ -69,15 +69,15 @@ class StrategyConfig:
         default_factory=lambda: _env_float("LATPOLY_STRAT_MIN_MID", 0.15)
     )
     max_mid_entry: float = field(
-        default_factory=lambda: _env_float("LATPOLY_STRAT_MAX_MID", 0.85)
+        default_factory=lambda: _env_float("LATPOLY_STRAT_MAX_MID", 0.70)  # sweep: 0.70 optimal
     )
 
     # --- BTC-to-PM rate (calibrate with calibrate_rate.py!) ---
     btc_to_pm_base_rate: float = field(
-        default_factory=lambda: _env_float("LATPOLY_STRAT_BTC_PM_RATE", 0.0008)
+        default_factory=lambda: _env_float("LATPOLY_STRAT_BTC_PM_RATE", 0.002)  # sweep: 0.002 optimal
     )
     min_bn_move_abs: float = field(
-        default_factory=lambda: _env_float("LATPOLY_STRAT_MIN_BN_MOVE", 4.0)
+        default_factory=lambda: _env_float("LATPOLY_STRAT_MIN_BN_MOVE", 6.0)  # sweep: $6 min
     )
 
     # --- Risk filters ---

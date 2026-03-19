@@ -26,12 +26,14 @@ async def _run(cfg: Config) -> None:
     from latpoly.workers.polymarket_ws import polymarket_worker
     from latpoly.workers.signal import signal_worker
     from latpoly.workers.writer import writer_worker
+    from latpoly.workers.paper_trader import paper_trader_worker
 
     tasks = [
         asyncio.create_task(binance_worker(cfg, state), name="W1-binance"),
         asyncio.create_task(polymarket_worker(cfg, state), name="W2-polymarket"),
         asyncio.create_task(signal_worker(cfg, state, writer_queue), name="W3-signal"),
         asyncio.create_task(writer_worker(cfg, state, writer_queue), name="W4-writer"),
+        asyncio.create_task(paper_trader_worker(cfg, state, writer_queue), name="W5-paper"),
         asyncio.create_task(health_loop(cfg, state, writer_queue), name="health"),
     ]
 
