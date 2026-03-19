@@ -116,17 +116,22 @@ def _extract_strike(text: str) -> float:
     - "SOL above 140?" -> 140.0
     """
     clean = text.replace(",", "")
-    # Try $-prefixed first (most reliable), then all numbers
-    for pattern in [r"\$([\d]+(?:\.\d+)?)", r"([\d]+(?:\.\d+)?)"]:
-        for match in re.finditer(pattern, clean):
-            try:
-                val = float(match.group(1))
-                # Accept any value > 1 (covers ETH ~2000, SOL ~140, XRP ~0.5)
-                # Filter out tiny numbers that are likely not strikes
-                if val > 1.0:
-                    return val
-            except ValueError:
-                continue
+    # $-prefixed is reliable — any value > 0
+    for match in re.finditer(r"\$([\d]+(?:\.\d+)?)", clean):
+        try:
+            val = float(match.group(1))
+            if val > 0:
+                return val
+        except ValueError:
+            continue
+    # Bare numbers: require > 50 to avoid dates (March 18), times (11, 30), etc.
+    for match in re.finditer(r"(?<!\d)([\d]+(?:\.\d+)?)(?!\d)", clean):
+        try:
+            val = float(match.group(1))
+            if val > 50:
+                return val
+        except ValueError:
+            continue
     return 0.0
 
 
