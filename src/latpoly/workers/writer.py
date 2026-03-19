@@ -45,12 +45,13 @@ class _FileHandle:
             self._fh = None
 
 
-def _session_path(data_dir: str, condition_id: str, start_ts: float) -> Path:
+def _session_path(data_dir: str, condition_id: str, start_ts: float, slot_id: str = "") -> Path:
     dt = datetime.fromtimestamp(start_ts, tz=timezone.utc)
     date_str = dt.strftime("%Y-%m-%d")
     ts_str = dt.strftime("%H%M%S")
     cid_short = condition_id[:12] if condition_id else "unknown"
-    return Path(data_dir) / "sessions" / f"{date_str}_{cid_short}_{ts_str}.jsonl"
+    slot_prefix = f"{slot_id}_" if slot_id else ""
+    return Path(data_dir) / "sessions" / f"{date_str}_{slot_prefix}{cid_short}_{ts_str}.jsonl"
 
 
 def _daily_path(data_dir: str) -> Path:
@@ -66,13 +67,13 @@ async def writer_worker(
     """Consume normalized ticks from queue and write to JSONL files."""
     log.info("Writer worker starting")
 
-    session_fh: Optional[_FileHandle] = None
+    # Per-slot session files (keyed by slot_id)
+    session_fhs: dict[str, _FileHandle] = {}
+    session_cids: dict[str, str] = {}  # slot_id -> last condition_id
     daily_fh: Optional[_FileHandle] = None
-    current_condition_id: str = ""
     current_date: str = ""
-    session_start_ts: float = 0.0
     batch: list[bytes] = []
-    batch_ticks: list[dict] = []  # keep tick dicts for metadata inspection
+    batch_ticks: list[dict] = []
     last_flush = time.monotonic()
 
     try:
@@ -84,7 +85,7 @@ async def writer_worker(
                 batch.append(line)
                 batch_ticks.append(tick)
             except asyncio.TimeoutError:
-                pass  # just flush what we have
+                pass
             except asyncio.CancelledError:
                 break
 
@@ -98,18 +99,6 @@ async def writer_worker(
             if not batch or not should_flush:
                 continue
 
-            # Handle session file rotation (use latest tick in batch)
-            cid = batch_ticks[-1].get("condition_id", "") if batch_ticks else ""
-            if cid and cid != current_condition_id:
-                if session_fh:
-                    session_fh.close()
-                current_condition_id = cid
-                session_start_ts = time.time()
-                session_fh = _FileHandle(
-                    _session_path(cfg.data_dir, cid, session_start_ts)
-                )
-                log.info("New session file for market %s", cid[:12])
-
             # Handle daily file rotation
             today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
             if today != current_date:
@@ -118,17 +107,43 @@ async def writer_worker(
                 current_date = today
                 daily_fh = _FileHandle(_daily_path(cfg.data_dir))
 
-            # Write batch (in thread to avoid blocking)
+            # Group batch by slot for session file routing
+            # But write ALL to daily file
             lines = batch
+            ticks = batch_ticks
             batch = []
             batch_ticks = []
             last_flush = now
 
+            # Handle per-slot session file rotation
+            for tick_data in ticks:
+                cid = tick_data.get("condition_id", "")
+                slot_id = tick_data.get("slot_id", "")
+                key = slot_id or "_default"
+
+                if cid and cid != session_cids.get(key, ""):
+                    # Close old session file for this slot
+                    old_fh = session_fhs.get(key)
+                    if old_fh:
+                        old_fh.close()
+                    session_cids[key] = cid
+                    session_fhs[key] = _FileHandle(
+                        _session_path(cfg.data_dir, cid, time.time(), slot_id)
+                    )
+                    log.info("New session file for %s market %s", slot_id or "default", cid[:12])
+
+            # Write batch to daily file
             bytes_written = 0
-            if session_fh:
-                bytes_written += await asyncio.to_thread(session_fh.write_batch, lines)
             if daily_fh:
                 bytes_written += await asyncio.to_thread(daily_fh.write_batch, lines)
+
+            # Write each line to its slot's session file
+            for line_bytes, tick_data in zip(lines, ticks):
+                slot_id = tick_data.get("slot_id", "")
+                key = slot_id or "_default"
+                sfh = session_fhs.get(key)
+                if sfh:
+                    bytes_written += sfh.write_batch([line_bytes])
 
             state.writer_records_written += len(lines)
             state.writer_bytes_written += bytes_written
@@ -138,15 +153,20 @@ async def writer_worker(
     finally:
         # Flush remaining batch
         if batch:
-            if session_fh:
-                session_fh.write_batch(batch)
             if daily_fh:
                 daily_fh.write_batch(batch)
+            # Write to session files too
+            for line_bytes, tick_data in zip(batch, batch_ticks):
+                slot_id = tick_data.get("slot_id", "")
+                key = slot_id or "_default"
+                sfh = session_fhs.get(key)
+                if sfh:
+                    sfh.write_batch([line_bytes])
             state.writer_records_written += len(batch)
             log.info("Flushed %d remaining records", len(batch))
 
-        if session_fh:
-            session_fh.close()
+        for sfh in session_fhs.values():
+            sfh.close()
         if daily_fh:
             daily_fh.close()
 

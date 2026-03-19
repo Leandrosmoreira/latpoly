@@ -1,4 +1,7 @@
-"""W1 — Binance combined stream worker (trade + bookTicker)."""
+"""W1 — Binance combined stream worker (trade + bookTicker).
+
+Multi-market: one worker per unique Binance symbol.
+"""
 
 from __future__ import annotations
 
@@ -9,19 +12,18 @@ import time
 import orjson
 
 from latpoly.config import Config
-from latpoly.shared_state import SharedState
+from latpoly.shared_state import BinanceState, SharedState
 from latpoly.utils.ws_base import ws_connect_forever
 
 log = logging.getLogger(__name__)
 
 
-def _handle_trade(data: dict, state: SharedState) -> None:
-    """Process a trade event and update shared state."""
+def _handle_trade(data: dict, bn: BinanceState) -> None:
+    """Process a trade event and update state."""
     price = float(data["p"])
     qty = float(data["q"])
     trade_time_ms = data["T"]
 
-    bn = state.binance
     bn.last_trade_price = price
     bn.last_trade_qty = qty
     bn.last_trade_time_ms = trade_time_ms
@@ -30,14 +32,13 @@ def _handle_trade(data: dict, state: SharedState) -> None:
     bn.event_count += 1
 
 
-def _handle_book_ticker(data: dict, state: SharedState) -> None:
-    """Process a bookTicker event and update shared state."""
+def _handle_book_ticker(data: dict, bn: BinanceState) -> None:
+    """Process a bookTicker event and update state."""
     bid = float(data["b"])
     ask = float(data["a"])
     bid_qty = float(data["B"])
     ask_qty = float(data["A"])
 
-    bn = state.binance
     bn.best_bid = bid
     bn.best_bid_qty = bid_qty
     bn.best_ask = ask
@@ -54,21 +55,20 @@ _HANDLERS_BY_EVENT = {
     "bookTicker": _handle_book_ticker,
 }
 
-# Binance combined stream bookTicker payloads often lack the "e" field,
-# so we also dispatch by stream name suffix.
 _HANDLERS_BY_STREAM = {
     "@trade": _handle_trade,
     "@bookTicker": _handle_book_ticker,
 }
 
 
-async def binance_worker(cfg: Config, state: SharedState) -> None:
-    """Connect to Binance combined stream and update SharedState."""
-    url = cfg.binance_ws_url
-    log.info("Binance worker starting: %s", url)
+async def binance_worker(cfg: Config, state: SharedState, symbol: str) -> None:
+    """Connect to Binance combined stream for a specific symbol."""
+    url = cfg.binance_ws_url_for(symbol)
+    bn = state.get_binance(symbol)
+    log.info("Binance worker starting: %s → %s", symbol, url)
 
     async for ws in ws_connect_forever(
-        url, "binance", state.shutdown, ping_interval=15.0
+        url, f"binance-{symbol}", state.shutdown, ping_interval=15.0
     ):
         try:
             async for raw in ws:
@@ -79,24 +79,22 @@ async def binance_worker(cfg: Config, state: SharedState) -> None:
                 stream_name: str = envelope.get("stream", "")
                 data: dict = envelope.get("data", {})
 
-                # Dispatch by "e" field first, fall back to stream name
                 event_type = data.get("e", "")
                 handler = _HANDLERS_BY_EVENT.get(event_type)
                 if handler is None:
-                    # bookTicker in combined stream may lack "e" field
                     for suffix, h in _HANDLERS_BY_STREAM.items():
                         if stream_name.endswith(suffix):
                             handler = h
                             break
                 if handler:
-                    handler(data, state)
+                    handler(data, bn)
 
         except asyncio.CancelledError:
-            log.info("Binance worker cancelled")
+            log.info("Binance worker %s cancelled", symbol)
             return
         except Exception:
             if state.shutdown.is_set():
                 return
-            log.exception("Binance worker error, reconnecting")
+            log.exception("Binance worker %s error, reconnecting", symbol)
 
-    log.info("Binance worker stopped")
+    log.info("Binance worker %s stopped", symbol)

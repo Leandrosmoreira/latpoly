@@ -1,10 +1,7 @@
 """W5 — Paper trading worker: runs StrategyEngine on live ticks (no real orders).
 
-Consumes the same normalized ticks as the JSONL writer, feeds them to the
-StrategyEngine, and logs every signal + simulated P&L to stderr and a
-separate paper_trades.jsonl file.
-
-This is Phase 3.1 — validates the strategy in real-time before going live.
+Multi-market: one StrategyEngine per slot, with global risk management.
+Phase 3.1 — validates the strategy in real-time before going live.
 """
 
 from __future__ import annotations
@@ -26,26 +23,35 @@ log = logging.getLogger(__name__)
 
 
 class PaperTrader:
-    """Wraps StrategyEngine with logging, file output, and daily stats."""
+    """Wraps multiple StrategyEngines (one per slot) with logging and global risk."""
 
-    def __init__(self, strat_cfg: StrategyConfig, output_dir: str = "data/paper") -> None:
-        self.engine = StrategyEngine(strat_cfg)
+    def __init__(self, strat_cfg: StrategyConfig, slot_ids: list[str],
+                 output_dir: str = "data/paper") -> None:
         self.strat_cfg = strat_cfg
-        self._tick_idx: int = 0
+        self._engines: dict[str, StrategyEngine] = {
+            sid: StrategyEngine(strat_cfg) for sid in slot_ids
+        }
+        self._tick_idx: dict[str, int] = {sid: 0 for sid in slot_ids}
         self._output_dir = Path(output_dir)
         self._output_dir.mkdir(parents=True, exist_ok=True)
         self._trade_file: Optional[object] = None
         self._signal_file: Optional[object] = None
         self._current_date: str = ""
 
-        # Daily stats
+        # Per-slot daily stats
         self._daily_signals: int = 0
         self._daily_entries: int = 0
         self._daily_exits: int = 0
         self._daily_pnl: float = 0.0
+
+        # Global session stats
         self._session_pnl: float = 0.0
         self._session_trades: int = 0
         self._session_wins: int = 0
+
+        # Per-slot session P&L (for display)
+        self._slot_pnl: dict[str, float] = {sid: 0.0 for sid in slot_ids}
+        self._slot_trades: dict[str, int] = {sid: 0 for sid in slot_ids}
 
     def _rotate_files(self) -> None:
         """Open new output files if the date changed."""
@@ -53,7 +59,6 @@ class PaperTrader:
         if today == self._current_date:
             return
 
-        # Close old files
         if self._trade_file is not None:
             self._trade_file.close()
         if self._signal_file is not None:
@@ -73,12 +78,35 @@ class PaperTrader:
         self._daily_exits = 0
         self._daily_pnl = 0.0
 
-    def on_tick(self, tick: dict) -> Signal:
-        """Process one live tick through the strategy engine."""
-        self._rotate_files()
-        self._tick_idx += 1
+    def _check_global_risk(self) -> bool:
+        """Return True if trading is allowed (global kill switch not hit)."""
+        total_pnl = sum(
+            sum(t["pnl_net"] for t in e.closed_trades)
+            for e in self._engines.values()
+        )
+        if total_pnl <= -self.strat_cfg.max_daily_loss:
+            return False
+        return True
 
-        signal = self.engine.on_tick(tick, self._tick_idx)
+    def on_tick(self, tick: dict) -> Signal:
+        """Process one live tick through the appropriate slot engine."""
+        self._rotate_files()
+
+        slot_id = tick.get("slot_id", "unknown")
+        engine = self._engines.get(slot_id)
+        if engine is None:
+            return Signal(action="NONE")
+
+        self._tick_idx[slot_id] = self._tick_idx.get(slot_id, 0) + 1
+        tick_idx = self._tick_idx[slot_id]
+
+        # Global risk check before entry
+        if not self._check_global_risk():
+            # Still allow exits, but skip entry signals
+            if engine._position is None:
+                return Signal(action="NONE")
+
+        signal = engine.on_tick(tick, tick_idx)
 
         if signal.action == "NONE":
             return signal
@@ -89,15 +117,15 @@ class PaperTrader:
         if signal.action in ("BUY_YES", "BUY_NO"):
             self._daily_entries += 1
             log.info(
-                "📝 PAPER ENTRY: %s %s sz=%d @ $%.4f → target=$%.4f  edge=%.4f  [%s]",
-                signal.action, signal.side, signal.size,
+                "📝 [%s] PAPER ENTRY: %s %s sz=%d @ $%.4f → target=$%.4f  edge=%.4f  [%s]",
+                slot_id, signal.action, signal.side, signal.size,
                 signal.entry_price, signal.exit_target,
                 signal.net_edge, signal.reason,
             )
-            # Log signal to file
             self._write_signal({
                 "ts": now_iso,
                 "ts_ns": tick.get("ts_ns"),
+                "slot_id": slot_id,
                 "action": signal.action,
                 "side": signal.side,
                 "entry_price": signal.entry_price,
@@ -106,7 +134,7 @@ class PaperTrader:
                 "net_edge": round(signal.net_edge, 6),
                 "time_weight": round(signal.time_weight, 4),
                 "reason": signal.reason,
-                "tick_idx": self._tick_idx,
+                "tick_idx": tick_idx,
                 "condition_id": tick.get("condition_id"),
                 "mid_binance": tick.get("mid_binance"),
                 "distance_to_strike": tick.get("distance_to_strike"),
@@ -116,14 +144,15 @@ class PaperTrader:
         elif signal.action == "EXIT":
             self._daily_exits += 1
 
-            # Get the last closed trade from engine
-            trades = self.engine.closed_trades
+            trades = engine.closed_trades
             if trades:
                 last_trade = trades[-1]
                 pnl = last_trade["pnl_net"]
                 self._daily_pnl += pnl
                 self._session_pnl += pnl
                 self._session_trades += 1
+                self._slot_pnl[slot_id] = self._slot_pnl.get(slot_id, 0.0) + pnl
+                self._slot_trades[slot_id] = self._slot_trades.get(slot_id, 0) + 1
                 if pnl > 0:
                     self._session_wins += 1
 
@@ -131,17 +160,17 @@ class PaperTrader:
 
                 emoji = "✅" if pnl > 0 else "❌"
                 log.info(
-                    "%s PAPER EXIT: %s %s entry=$%.4f exit=$%.4f pnl=$%+.4f  "
+                    "%s [%s] PAPER EXIT: %s %s entry=$%.4f exit=$%.4f pnl=$%+.4f  "
                     "hold=%dt  type=%s  [session: %d trades, %.0f%% WR, $%+.2f]",
-                    emoji, signal.side, signal.reason,
+                    emoji, slot_id, signal.side, signal.reason,
                     last_trade["entry_price"], last_trade["exit_price"], pnl,
                     last_trade["hold_ticks"], last_trade["exit_type"],
                     self._session_trades, win_rate, self._session_pnl,
                 )
 
-                # Log trade to file
                 self._write_trade({
                     "ts": now_iso,
+                    "slot_id": slot_id,
                     **last_trade,
                     "session_pnl": round(self._session_pnl, 4),
                     "session_trades": self._session_trades,
@@ -150,8 +179,8 @@ class PaperTrader:
 
         elif signal.action == "HOLD_TO_EXPIRY":
             log.info(
-                "🏁 PAPER HOLD_TO_EXPIRY: %s — %s",
-                signal.side, signal.reason,
+                "🏁 [%s] PAPER HOLD_TO_EXPIRY: %s — %s",
+                slot_id, signal.side, signal.reason,
             )
 
         return signal
@@ -169,15 +198,24 @@ class PaperTrader:
     def print_daily_summary(self) -> None:
         """Print daily summary to log."""
         if self._session_trades == 0:
-            log.info("📊 PAPER DAILY: no trades today")
+            log.info("📊 PAPER DAILY: no trades yet")
             return
 
         wr = (self._session_wins / self._session_trades * 100) if self._session_trades > 0 else 0
+
+        # Per-slot breakdown
+        slot_parts = []
+        for sid in sorted(self._slot_trades.keys()):
+            cnt = self._slot_trades[sid]
+            if cnt > 0:
+                slot_parts.append(f"{sid}={cnt}/$%+.2f" % self._slot_pnl[sid])
+
         log.info(
             "📊 PAPER DAILY: entries=%d exits=%d pnl_today=$%+.2f | "
-            "SESSION: %d trades, %.0f%% WR, $%+.2f total",
+            "SESSION: %d trades, %.0f%% WR, $%+.2f total | %s",
             self._daily_entries, self._daily_exits, self._daily_pnl,
             self._session_trades, wr, self._session_pnl,
+            "  ".join(slot_parts) if slot_parts else "no slot data",
         )
 
     def close(self) -> None:
@@ -193,16 +231,15 @@ async def paper_trader_worker(
     state: SharedState,
     tick_queue: asyncio.Queue[dict],
 ) -> None:
-    """Async worker that reads ticks from the signal queue and paper trades.
-
-    Runs alongside the existing workers. Does NOT modify shared state.
-    """
+    """Async worker that reads ticks from shared state and paper trades all slots."""
     strat_cfg = StrategyConfig()
-    trader = PaperTrader(strat_cfg)
+    slot_ids = [slot.slot_id for slot in cfg.market_slots]
+    trader = PaperTrader(strat_cfg, slot_ids)
 
     log.info(
-        "Paper trader starting: zscore=%.1f  btc_pm_rate=%.4f  "
+        "Paper trader starting: %d slots  zscore=%.1f  btc_pm_rate=%.4f  "
         "mid_range=[%.2f, %.2f]  min_bn_move=%.1f",
+        len(slot_ids),
         strat_cfg.zscore_entry_threshold,
         strat_cfg.btc_to_pm_base_rate,
         strat_cfg.min_mid_entry,
@@ -210,22 +247,17 @@ async def paper_trader_worker(
         strat_cfg.min_bn_move_abs,
     )
 
-    # We need our own copy of ticks — subscribe via a separate mechanism.
-    # Since signal_worker puts ticks on the writer queue, we'll build ticks
-    # directly from shared state on the same interval.
     from latpoly.workers.signal import (
-        build_normalized_tick, PriceHistory, PolyChangeTracker,
-        EmaZScore,
+        build_normalized_tick, SlotSignalState,
     )
 
-    price_history = PriceHistory()
-    poly_tracker = PolyChangeTracker()
-    zscore_bn_move = EmaZScore()
-    zscore_ret1s = EmaZScore()
+    # Per-slot signal state (independent from signal worker)
+    slot_signal_states: dict[str, SlotSignalState] = {
+        sid: SlotSignalState() for sid in slot_ids
+    }
 
     interval = cfg.signal_interval
-    last_condition_id = ""
-    summary_interval = 300  # print summary every 5 min
+    summary_interval = 300
     last_summary = 0.0
 
     # Wait for readiness
@@ -236,30 +268,40 @@ async def paper_trader_worker(
         trader.close()
         return
 
-    log.info("Paper trader ready — running on live data")
+    log.info("Paper trader ready — running on live data (%d slots)", len(slot_ids))
 
     try:
         while not state.shutdown.is_set():
             t0 = asyncio.get_event_loop().time()
 
-            # Market rotation
-            cid = state.polymarket.market.condition_id
-            if cid != last_condition_id:
-                price_history.clear()
-                poly_tracker.clear()
-                zscore_bn_move.clear()
-                zscore_ret1s.clear()
-                last_condition_id = cid
-                log.info("Paper trader: market rotated")
+            for slot_def in cfg.market_slots:
+                sid = slot_def.slot_id
+                bn = state.get_binance(slot_def.binance_symbol)
+                pm = state.get_polymarket(sid)
 
-            # Build tick from shared state (same as signal worker)
-            tick = build_normalized_tick(
-                state, price_history, poly_tracker,
-                zscore_bn_move, zscore_ret1s,
-            )
+                # Skip slots that aren't ready
+                if bn.best_bid is None or pm.yes_best_bid is None:
+                    continue
 
-            # Feed to strategy
-            trader.on_tick(tick)
+                ss = slot_signal_states[sid]
+
+                # Market rotation
+                cid = pm.market.condition_id
+                if cid != ss.last_condition_id:
+                    ss.clear()
+                    ss.last_condition_id = cid
+                    log.info("Paper trader [%s]: market rotated", sid)
+
+                # Build tick
+                tick = build_normalized_tick(
+                    bn, pm,
+                    ss.price_history, ss.poly_tracker,
+                    ss.zscore_bn_move, ss.zscore_ret1s,
+                )
+                tick["slot_id"] = sid
+
+                # Feed to strategy
+                trader.on_tick(tick)
 
             # Periodic summary
             now = time.time()

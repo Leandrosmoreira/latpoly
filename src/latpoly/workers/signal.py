@@ -27,8 +27,10 @@ import time
 from collections import deque
 from typing import Optional
 
+from dataclasses import dataclass, field
+
 from latpoly.config import Config
-from latpoly.shared_state import SharedState
+from latpoly.shared_state import BinanceState, PolymarketState, SharedState
 
 log = logging.getLogger(__name__)
 
@@ -524,19 +526,19 @@ def _compute_vwap_bid(
 
 
 def build_normalized_tick(
-    state: SharedState,
+    bn: "BinanceState",
+    pm: "PolymarketState",
     price_history: PriceHistory,
     poly_tracker: PolyChangeTracker,
     zscore_bn_move: EmaZScore,
     zscore_ret1s: EmaZScore,
 ) -> dict:
-    """Build the normalized tick from SharedState using indicator functions.
+    """Build the normalized tick from BinanceState + PolymarketState.
 
     All Optional[float] fields are kept as None in the dict (not 0.0)
     so downstream analysis can distinguish "no data" from "value is zero".
     """
-    bn = state.binance
-    pm = state.polymarket
+    from latpoly.shared_state import BinanceState, PolymarketState
     mkt = pm.market
     now_ns = time.time_ns()
     now_s = now_ns / 1e9
@@ -699,7 +701,30 @@ def build_normalized_tick(
 
 
 # ---------------------------------------------------------------------------
-# Worker coroutine
+# Per-slot signal state (used by signal worker and paper trader)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SlotSignalState:
+    """Per-slot state for signal computation."""
+
+    price_history: PriceHistory = field(default_factory=PriceHistory)
+    poly_tracker: PolyChangeTracker = field(default_factory=PolyChangeTracker)
+    zscore_bn_move: EmaZScore = field(default_factory=EmaZScore)
+    zscore_ret1s: EmaZScore = field(default_factory=EmaZScore)
+    last_condition_id: str = ""
+
+    def clear(self) -> None:
+        """Reset all state on market rotation."""
+        self.price_history.clear()
+        self.poly_tracker.clear()
+        self.zscore_bn_move.clear()
+        self.zscore_ret1s.clear()
+
+
+# ---------------------------------------------------------------------------
+# Worker coroutine (multi-slot)
 # ---------------------------------------------------------------------------
 
 
@@ -708,69 +733,74 @@ async def signal_worker(
     state: SharedState,
     out_queue: asyncio.Queue[dict],
 ) -> None:
-    """Poll shared state at fixed interval and produce normalized ticks."""
+    """Poll shared state at fixed interval and produce normalized ticks for all slots."""
     interval = cfg.signal_interval
-    log.info("Signal worker starting (interval=%.2fs)", interval)
+    slots = cfg.market_slots
+    log.info("Signal worker starting (interval=%.2fs, slots=%d)", interval, len(slots))
 
-    # Phase 1.1 state
-    price_history = PriceHistory()
-    poly_tracker = PolyChangeTracker()
+    # Per-slot state
+    slot_states: dict[str, SlotSignalState] = {
+        slot.slot_id: SlotSignalState() for slot in slots
+    }
 
-    # Phase 2 state
-    zscore_bn_move = EmaZScore()
-    zscore_ret1s = EmaZScore()
-
-    # Wait for readiness — log what's missing every 5 seconds
+    # Wait for readiness — at least one slot ready
     wait_count = 0
     while not state.shutdown.is_set() and not state.ready:
         await asyncio.sleep(0.5)
         wait_count += 1
-        if wait_count % 10 == 0:  # every 5 seconds
+        if wait_count % 10 == 0:
             bn_ok = state.binance_ready
             pm_ok = state.polymarket_ready
             log.info(
-                "Waiting for readiness: binance=%s (bid=%s) polymarket=%s (yes_bid=%s)",
-                bn_ok, state.binance.best_bid,
-                pm_ok, state.polymarket.yes_best_bid,
+                "Waiting for readiness: binance=%s polymarket=%s",
+                bn_ok, pm_ok,
             )
 
     if state.shutdown.is_set():
         return
 
-    log.info("Signal worker ready — both sources have data")
-
-    last_condition_id = ""
+    log.info("Signal worker ready — at least one slot has data")
 
     try:
         while not state.shutdown.is_set():
             t0 = asyncio.get_event_loop().time()
 
-            # Clear history on market rotation
-            cid = state.polymarket.market.condition_id
-            if cid != last_condition_id:
-                price_history.clear()
-                poly_tracker.clear()
-                zscore_bn_move.clear()
-                zscore_ret1s.clear()
-                last_condition_id = cid
-                log.info("Signal worker: market rotated, history cleared")
+            for slot_def in slots:
+                sid = slot_def.slot_id
+                bn = state.get_binance(slot_def.binance_symbol)
+                pm = state.get_polymarket(sid)
 
-            tick = build_normalized_tick(
-                state, price_history, poly_tracker,
-                zscore_bn_move, zscore_ret1s,
-            )
+                # Skip slots that aren't ready yet
+                if bn.best_bid is None or pm.yes_best_bid is None:
+                    continue
 
-            # Enqueue with drop-oldest if full
-            try:
-                out_queue.put_nowait(tick)
-            except asyncio.QueueFull:
+                ss = slot_states[sid]
+
+                # Clear history on market rotation
+                cid = pm.market.condition_id
+                if cid != ss.last_condition_id:
+                    ss.clear()
+                    ss.last_condition_id = cid
+                    log.info("Signal worker [%s]: market rotated, history cleared", sid)
+
+                tick = build_normalized_tick(
+                    bn, pm,
+                    ss.price_history, ss.poly_tracker,
+                    ss.zscore_bn_move, ss.zscore_ret1s,
+                )
+                tick["slot_id"] = sid
+
+                # Enqueue with drop-oldest if full
                 try:
-                    out_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    pass
-                out_queue.put_nowait(tick)
+                    out_queue.put_nowait(tick)
+                except asyncio.QueueFull:
+                    try:
+                        out_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                    out_queue.put_nowait(tick)
 
-            state.signal_tick_count += 1
+                state.signal_tick_count += 1
 
             elapsed = asyncio.get_event_loop().time() - t0
             await asyncio.sleep(max(0.0, interval - elapsed))

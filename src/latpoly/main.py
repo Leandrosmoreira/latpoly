@@ -1,4 +1,4 @@
-"""Entry point — orchestrates 4 workers + health monitor."""
+"""Entry point — orchestrates N workers + health monitor."""
 
 from __future__ import annotations
 
@@ -23,19 +23,33 @@ async def _run(cfg: Config) -> None:
     # Import workers
     from latpoly.health import health_loop
     from latpoly.workers.binance_ws import binance_worker
-    from latpoly.workers.polymarket_ws import polymarket_worker
+    from latpoly.workers.polymarket_ws import polymarket_slot_worker
     from latpoly.workers.signal import signal_worker
     from latpoly.workers.writer import writer_worker
     from latpoly.workers.paper_trader import paper_trader_worker
 
-    tasks = [
-        asyncio.create_task(binance_worker(cfg, state), name="W1-binance"),
-        asyncio.create_task(polymarket_worker(cfg, state), name="W2-polymarket"),
-        asyncio.create_task(signal_worker(cfg, state, writer_queue), name="W3-signal"),
-        asyncio.create_task(writer_worker(cfg, state, writer_queue), name="W4-writer"),
-        asyncio.create_task(paper_trader_worker(cfg, state, writer_queue), name="W5-paper"),
-        asyncio.create_task(health_loop(cfg, state, writer_queue), name="health"),
-    ]
+    tasks = []
+
+    # Binance workers: one per unique symbol
+    for sym in sorted(cfg.binance_symbols):
+        tasks.append(
+            asyncio.create_task(binance_worker(cfg, state, sym), name=f"W1-{sym}")
+        )
+
+    # Polymarket workers: one per slot
+    for i, slot in enumerate(cfg.market_slots):
+        tasks.append(
+            asyncio.create_task(
+                polymarket_slot_worker(cfg, state, slot),
+                name=f"W2-{slot.slot_id}",
+            )
+        )
+
+    # Shared workers
+    tasks.append(asyncio.create_task(signal_worker(cfg, state, writer_queue), name="W3-signal"))
+    tasks.append(asyncio.create_task(writer_worker(cfg, state, writer_queue), name="W4-writer"))
+    tasks.append(asyncio.create_task(paper_trader_worker(cfg, state, writer_queue), name="W5-paper"))
+    tasks.append(asyncio.create_task(health_loop(cfg, state, writer_queue), name="health"))
 
     # Shutdown handler
     loop = asyncio.get_running_loop()
@@ -47,7 +61,6 @@ async def _run(cfg: Config) -> None:
     if sys.platform != "win32":
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, _shutdown_signal)
-    # On Windows, KeyboardInterrupt will propagate naturally
 
     # Wait for shutdown event
     await state.shutdown.wait()
@@ -76,9 +89,14 @@ def entry() -> None:
     )
 
     cfg = Config()
-    log.info("Config: symbol=%s signal_interval=%.2fs", cfg.symbol, cfg.signal_interval)
-    log.info("Binance WS: %s", cfg.binance_ws_url)
-    log.info("Polymarket WS: %s", cfg.poly_ws_url)
+    slots = cfg.market_slots
+    log.info(
+        "Config: %d market slots, %d binance symbols, signal_interval=%.2fs",
+        len(slots), len(cfg.binance_symbols), cfg.signal_interval,
+    )
+    for slot in slots:
+        log.info("  Slot: %s (%s / %s / %ss)", slot.slot_id, slot.binance_symbol,
+                 slot.coin, slot.timeframe)
 
     try:
         asyncio.run(_run(cfg))
