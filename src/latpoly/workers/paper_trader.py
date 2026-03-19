@@ -95,7 +95,7 @@ class PaperTrader:
         slot_id = tick.get("slot_id", "unknown")
         engine = self._engines.get(slot_id)
         if engine is None:
-            return Signal(action="NONE")
+            return Signal(action="NONE", side="", reason="unknown_slot")
 
         self._tick_idx[slot_id] = self._tick_idx.get(slot_id, 0) + 1
         tick_idx = self._tick_idx[slot_id]
@@ -104,7 +104,7 @@ class PaperTrader:
         if not self._check_global_risk():
             # Still allow exits, but skip entry signals
             if engine._position is None:
-                return Signal(action="NONE")
+                return Signal(action="NONE", side="", reason="global_risk")
 
         signal = engine.on_tick(tick, tick_idx)
 
