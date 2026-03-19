@@ -450,15 +450,20 @@ class StrategyEngine:
         Entry is always taker (pays taker_fee_rate).
         Exit is maker (0% fee) for target fills, taker for timeout/reversal.
         Settlement has no fees.
+
+        Polymarket rule: maker orders require min_maker_size shares.
+        If position < min_maker_size, forced to exit as taker (1% fee).
         """
         cfg = self.cfg
         entry_cost = pos.entry_price * pos.size * (1.0 + cfg.taker_fee_rate)
 
         if is_settlement:
             exit_revenue = exit_price * pos.size
-        elif is_maker:
+        elif is_maker and pos.size >= cfg.min_maker_size:
+            # Maker exit: 0% fee (normal case)
             exit_revenue = exit_price * pos.size * (1.0 - cfg.maker_fee_rate)
         else:
+            # Taker exit: 1% fee (forced if size < min_maker_size)
             exit_revenue = exit_price * pos.size * (1.0 - cfg.taker_fee_rate)
 
         return exit_revenue - entry_cost

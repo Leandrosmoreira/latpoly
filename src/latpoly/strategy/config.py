@@ -55,11 +55,17 @@ class StrategyConfig:
     )
 
     # --- Position sizing ---
+    # Polymarket minimum: 5 shares for maker orders
+    # Below 5 shares → forced taker exit (1% fee)
     base_size_contracts: int = field(
-        default_factory=lambda: _env_int("LATPOLY_STRAT_BASE_SIZE", 100)
+        default_factory=lambda: _env_int("LATPOLY_STRAT_BASE_SIZE", 5)
     )
     max_position_contracts: int = field(
-        default_factory=lambda: _env_int("LATPOLY_STRAT_MAX_POSITION", 500)
+        default_factory=lambda: _env_int("LATPOLY_STRAT_MAX_POSITION", 25)
+    )
+    # Minimum shares for maker exit on Polymarket
+    min_maker_size: int = field(
+        default_factory=lambda: _env_int("LATPOLY_STRAT_MIN_MAKER_SIZE", 5)
     )
 
     # --- Probability range filter ---
@@ -127,8 +133,11 @@ class StrategyConfig:
     )
 
     # --- Kill switches ---
+    initial_bankroll: float = field(
+        default_factory=lambda: _env_float("LATPOLY_STRAT_BANKROLL", 50.0)
+    )
     max_daily_loss: float = field(
-        default_factory=lambda: _env_float("LATPOLY_STRAT_MAX_DAILY_LOSS", 50.0)
+        default_factory=lambda: _env_float("LATPOLY_STRAT_MAX_DAILY_LOSS", 10.0)  # 20% of $50 bankroll
     )
     max_daily_trades: int = field(
         default_factory=lambda: _env_int("LATPOLY_STRAT_MAX_DAILY_TRADES", 500)  # was 200, hitting cap
