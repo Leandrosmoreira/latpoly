@@ -482,6 +482,45 @@ def print_sweep_report(results: list[BacktestResult]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _load_ticks_filtered(paths: list[str], slot_id: str) -> list[dict]:
+    """Load ticks from JSONL, keeping only those matching slot_id (or legacy ticks without slot_id).
+
+    Filters line-by-line to avoid loading the full multi-slot file into memory.
+    Uses a fast string pre-check before JSON parsing to skip irrelevant lines.
+    """
+    import json
+    from pathlib import Path
+
+    ticks = []
+    skipped = 0
+    for p in paths:
+        path = Path(p)
+        if not path.exists():
+            print(f"WARNING: {p} not found, skipping")
+            continue
+        with open(path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                # Fast pre-filter: if line has a slot_id field that doesn't match, skip without parsing
+                if '"slot_id"' in line and f'"slot_id":"{slot_id}"' not in line:
+                    skipped += 1
+                    continue
+                try:
+                    tick = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                # Double-check: legacy ticks (no slot_id) pass through, matching slot_id passes
+                if tick.get("slot_id", slot_id) == slot_id:
+                    ticks.append(tick)
+                else:
+                    skipped += 1
+    if skipped:
+        print(f"  (skipped {skipped:,} ticks from other slots)")
+    return ticks
+
+
 def main() -> None:
     """CLI: python -m latpoly.strategy.backtest <file.jsonl> [--sweep]"""
     args = sys.argv[1:]
@@ -520,15 +559,14 @@ def main() -> None:
         print("ERROR: No input files specified.")
         sys.exit(1)
 
-    # Load ticks
+    # Load ticks (with optional streaming filter to avoid OOM on large multi-slot files)
     print(f"Loading ticks from {len(file_args)} file(s)...")
-    ticks = load_ticks(file_args)
-    print(f"Loaded {len(ticks):,} ticks")
-
     if slot_filter:
-        # Keep ticks matching the slot OR legacy ticks (no slot_id field = old btc-15m data)
-        ticks = [t for t in ticks if t.get("slot_id", slot_filter) == slot_filter]
-        print(f"Filtered to slot '{slot_filter}': {len(ticks):,} ticks")
+        ticks = _load_ticks_filtered(file_args, slot_filter)
+        print(f"Loaded {len(ticks):,} ticks (filtered to slot '{slot_filter}')")
+    else:
+        ticks = load_ticks(file_args)
+        print(f"Loaded {len(ticks):,} ticks")
 
     if not ticks:
         print("No ticks loaded. Check file paths.")
