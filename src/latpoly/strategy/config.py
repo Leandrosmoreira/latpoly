@@ -32,7 +32,7 @@ class StrategyConfig:
 
     # --- Entry window (seconds before expiry) ---
     entry_window_max_s: float = field(
-        default_factory=lambda: _env_float("LATPOLY_STRAT_ENTRY_MAX_S", 300.0)
+        default_factory=lambda: _env_float("LATPOLY_STRAT_ENTRY_MAX_S", 900.0)  # sweep: full 15min window
     )
     entry_window_min_s: float = field(
         default_factory=lambda: _env_float("LATPOLY_STRAT_ENTRY_MIN_S", 30.0)
@@ -131,5 +131,5 @@ class StrategyConfig:
         default_factory=lambda: _env_float("LATPOLY_STRAT_MAX_DAILY_LOSS", 50.0)
     )
     max_daily_trades: int = field(
-        default_factory=lambda: _env_int("LATPOLY_STRAT_MAX_DAILY_TRADES", 200)
+        default_factory=lambda: _env_int("LATPOLY_STRAT_MAX_DAILY_TRADES", 500)  # was 200, hitting cap
     )
