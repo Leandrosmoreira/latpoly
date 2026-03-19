@@ -137,13 +137,15 @@ async def writer_worker(
             if daily_fh:
                 bytes_written += await asyncio.to_thread(daily_fh.write_batch, lines)
 
-            # Write each line to its slot's session file
+            # Write each line to its slot's session file — group by slot first
+            slot_batches: dict[str, list[bytes]] = {}
             for line_bytes, tick_data in zip(lines, ticks):
-                slot_id = tick_data.get("slot_id", "")
-                key = slot_id or "_default"
+                key = tick_data.get("slot_id", "") or "_default"
+                slot_batches.setdefault(key, []).append(line_bytes)
+            for key, slot_lines in slot_batches.items():
                 sfh = session_fhs.get(key)
                 if sfh:
-                    bytes_written += sfh.write_batch([line_bytes])
+                    bytes_written += await asyncio.to_thread(sfh.write_batch, slot_lines)
 
             state.writer_records_written += len(lines)
             state.writer_bytes_written += bytes_written

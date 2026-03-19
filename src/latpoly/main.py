@@ -62,15 +62,38 @@ async def _run(cfg: Config) -> None:
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, _shutdown_signal)
 
-    # Monitor tasks for crashes while waiting for shutdown
+    # Worker factory for restarts — maps task name prefix to coroutine builder
+    from latpoly.workers.binance_ws import binance_worker as _bw
+    from latpoly.workers.polymarket_ws import polymarket_slot_worker as _pw
+    from latpoly.workers.paper_trader import paper_trader_worker as _pt
+
+    def _rebuild_worker(name: str) -> Optional[asyncio.Task]:
+        """Rebuild a crashed worker task by name."""
+        if name.startswith("W1-"):
+            sym = name[3:]
+            return asyncio.create_task(_bw(cfg, state, sym), name=name)
+        if name.startswith("W2-"):
+            sid = name[3:]
+            slot = next((s for s in cfg.market_slots if s.slot_id == sid), None)
+            if slot:
+                return asyncio.create_task(_pw(cfg, state, slot), name=name)
+        if name == "W5-paper":
+            return asyncio.create_task(_pt(cfg, state, writer_queue), name=name)
+        return None
+
+    # Monitor tasks for crashes — restart critical workers
     while not state.shutdown.is_set():
         await asyncio.sleep(5.0)
-        for t in tasks:
+        for i, t in enumerate(tasks):
             if t.done() and not t.cancelled():
                 exc = t.exception()
                 if exc is not None:
                     log.error("Worker %s crashed: %s: %s", t.get_name(),
                               type(exc).__name__, exc)
+                    new_task = _rebuild_worker(t.get_name())
+                    if new_task is not None:
+                        log.info("Restarting worker %s", t.get_name())
+                        tasks[i] = new_task
 
     log.info("Shutting down workers...")
 

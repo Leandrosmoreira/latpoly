@@ -146,11 +146,7 @@ class SharedState:
     @property
     def ready(self) -> bool:
         """True if at least one slot has both sources ready."""
-        for slot_id, pm in self.polymarket_states.items():
-            if pm.yes_best_bid is None:
-                continue
-            # Find the binance symbol for this slot — check all binance states
-            for bn in self.binance_states.values():
-                if bn.best_bid is not None:
-                    return True
-        return False
+        # At least one polymarket slot has data AND at least one binance feed has data
+        has_pm = any(pm.yes_best_bid is not None for pm in self.polymarket_states.values())
+        has_bn = any(bn.best_bid is not None for bn in self.binance_states.values())
+        return has_pm and has_bn

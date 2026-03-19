@@ -12,7 +12,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Optional
+from typing import IO, Optional
 
 from latpoly.config import Config
 from latpoly.shared_state import SharedState
@@ -34,8 +34,8 @@ class PaperTrader:
         self._tick_idx: dict[str, int] = {sid: 0 for sid in slot_ids}
         self._output_dir = Path(output_dir)
         self._output_dir.mkdir(parents=True, exist_ok=True)
-        self._trade_file: Optional[object] = None
-        self._signal_file: Optional[object] = None
+        self._trade_file: Optional[IO] = None
+        self._signal_file: Optional[IO] = None
         self._current_date: str = ""
 
         # Per-slot daily stats
@@ -68,8 +68,12 @@ class PaperTrader:
         trade_path = self._output_dir / f"paper_trades_{today}.jsonl"
         signal_path = self._output_dir / f"paper_signals_{today}.jsonl"
 
-        self._trade_file = open(trade_path, "a")
-        self._signal_file = open(signal_path, "a")
+        try:
+            self._trade_file = open(trade_path, "a")
+            self._signal_file = open(signal_path, "a")
+        except OSError:
+            log.exception("Paper trader: cannot open output files")
+            return
         log.info("Paper trader: writing to %s", trade_path)
 
         # Reset daily stats
@@ -208,7 +212,7 @@ class PaperTrader:
         for sid in sorted(self._slot_trades.keys()):
             cnt = self._slot_trades[sid]
             if cnt > 0:
-                slot_parts.append(f"{sid}={cnt}/$%+.2f" % self._slot_pnl[sid])
+                slot_parts.append(f"{sid}={cnt}/${self._slot_pnl[sid]:+.2f}")
 
         log.info(
             "📊 PAPER DAILY: entries=%d exits=%d pnl_today=$%+.2f | "
@@ -275,7 +279,7 @@ async def paper_trader_worker(
 
     try:
         while not state.shutdown.is_set():
-            t0 = asyncio.get_event_loop().time()
+            t0 = asyncio.get_running_loop().time()
 
             try:
                 for slot_def in cfg.market_slots:
@@ -326,7 +330,7 @@ async def paper_trader_worker(
                 trader.print_daily_summary()
                 last_summary = now
 
-            elapsed = asyncio.get_event_loop().time() - t0
+            elapsed = asyncio.get_running_loop().time() - t0
             await asyncio.sleep(max(0.0, interval - elapsed))
 
     except asyncio.CancelledError:

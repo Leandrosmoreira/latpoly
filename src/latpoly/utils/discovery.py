@@ -317,8 +317,14 @@ async def fetch_book_snapshot(
     bids = book.get("bids", [])
     asks = book.get("asks", [])
 
-    best_bid = float(bids[-1]["price"]) if bids else None
-    best_ask = float(asks[-1]["price"]) if asks else None
+    try:
+        best_bid = float(bids[-1]["price"]) if bids else None
+    except (KeyError, ValueError, TypeError, IndexError):
+        best_bid = None
+    try:
+        best_ask = float(asks[-1]["price"]) if asks else None
+    except (KeyError, ValueError, TypeError, IndexError):
+        best_ask = None
 
     bids_levels = []
     for entry in reversed(bids):
