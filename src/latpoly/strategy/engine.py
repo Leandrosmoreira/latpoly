@@ -4,10 +4,11 @@ Consumes normalized ticks (dicts) and emits Signal objects.
 No I/O, no async — used identically by backtester, paper, and live.
 
 Strategy:
-- Entry: taker (aggressive) when Binance moved but Polymarket hasn't
+- Entry: maker (limit at best_bid, 0% fee) or taker (hit ask, pays fee)
 - Exit: maker (limit order at target) or hold-to-expiry for near-certain outcomes
 - Window: only trade between entry_window_max_s and entry_window_min_s before expiry
 - Risk: momentum confirmation, minimum distance to strike, data freshness, cooldown
+- Multi-position: up to max_concurrent_positions open at once, capped by exposure
 """
 
 from __future__ import annotations
@@ -65,13 +66,17 @@ _NONE_SIGNAL = Signal(action="NONE", side="", reason="no action")
 
 
 class StrategyEngine:
-    """Stateful strategy engine. Feed ticks via on_tick(), get Signals back."""
+    """Stateful strategy engine. Feed ticks via on_tick(), get Signals back.
+
+    Supports multiple concurrent positions (up to max_concurrent_positions).
+    Returns one Signal per tick: the most important action (exit > entry > hold).
+    """
 
     def __init__(self, cfg: StrategyConfig) -> None:
         self.cfg = cfg
 
-        # Current state
-        self._position: Optional[Position] = None
+        # Current state — multiple concurrent positions
+        self._positions: list[Position] = []
         self._last_condition_id: str = ""
         self._last_entry_tick_idx: int = -9999
         self._daily_trade_count: int = 0
@@ -81,15 +86,25 @@ class StrategyEngine:
         # Trades log (for backtester to consume)
         self.closed_trades: list[dict] = []
 
+    # --- Backward compat properties ---
+
+    @property
+    def _position(self) -> Optional[Position]:
+        """First open position (backward compat for paper trader)."""
+        return self._positions[0] if self._positions else None
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def on_tick(self, tick: dict, tick_idx: int) -> Signal:
-        """Process one tick. Returns a Signal (may be NONE)."""
+        """Process one tick. Returns a Signal (may be NONE).
+
+        Order: settlement > exits > entry > holding.
+        """
         cid = tick.get("condition_id", "")
 
-        # Market rotation: settle open position from previous market
+        # Market rotation: settle ALL open positions from previous market
         if cid and cid != self._last_condition_id:
             settle_signal = self._handle_rotation(tick, tick_idx)
             self._last_condition_id = cid
@@ -104,17 +119,116 @@ class StrategyEngine:
         if self._daily_pnl <= -self.cfg.max_daily_loss:
             return Signal(action="NONE", side="", reason="max_daily_loss")
 
-        # Has open position? -> check exit
-        if self._position is not None:
-            return self._check_exit(tick, tick_idx)
+        # Check exits for all open positions (process oldest first)
+        exit_signal = self._check_exits(tick, tick_idx)
+        if exit_signal is not None:
+            return exit_signal
 
-        # No position -> check entry
-        return self._check_entry(tick, tick_idx)
+        # Check if we can open a new position
+        if len(self._positions) < self.cfg.max_concurrent_positions:
+            # Check exposure limit
+            total_exposure = sum(p.entry_price * p.size for p in self._positions)
+            max_exposure = self.cfg.initial_bankroll * self.cfg.max_exposure_frac
+            if total_exposure < max_exposure:
+                return self._check_entry(tick, tick_idx)
+
+            return Signal(action="NONE", side="", reason="max_exposure")
+
+        return Signal(action="NONE", side="", reason="max_positions")
 
     def reset_daily(self) -> None:
         """Reset daily counters (call at UTC midnight)."""
         self._daily_trade_count = 0
         self._daily_pnl = 0.0
+
+    # ------------------------------------------------------------------
+    # Exit logic (multi-position)
+    # ------------------------------------------------------------------
+
+    def _check_exits(self, tick: dict, tick_idx: int) -> Optional[Signal]:
+        """Check exit conditions for all open positions. Returns first exit signal found."""
+        to_remove: list[int] = []
+
+        for i, pos in enumerate(self._positions):
+            pos.hold_ticks += 1
+            signal = self._check_single_exit(pos, tick, tick_idx)
+            if signal is not None and signal.action != "NONE":
+                to_remove.append(i)
+                # Remove the closed position(s) — process one exit per tick
+                for idx in reversed(to_remove):
+                    self._positions.pop(idx)
+                return signal
+
+        # If any positions are holding, report that
+        if self._positions:
+            return Signal(action="NONE", side="", reason="holding")
+        return None
+
+    def _check_single_exit(self, pos: Position, tick: dict, tick_idx: int) -> Optional[Signal]:
+        """Check if a single position should be exited."""
+        tte_ms = tick.get("time_to_expiry_ms")
+        tte_s = (tte_ms / 1000.0) if tte_ms is not None else 999.0
+
+        # --- Hold to expiry ---
+        dist = tick.get("distance_to_strike")
+        if tte_s < 10.0 and dist is not None:
+            if (pos.side == "YES" and dist > self.cfg.hold_to_expiry_distance) or \
+               (pos.side == "NO" and dist < -self.cfg.hold_to_expiry_distance):
+                return Signal(
+                    action="HOLD_TO_EXPIRY", side=pos.side,
+                    reason=f"dist={dist:.1f} tte={tte_s:.1f}s",
+                    exit_price=1.0,  # will settle at $1.00
+                    size=pos.size, tick_idx=tick_idx,
+                )
+
+        # --- Exit by target (maker) ---
+        mid_key = "mid_yes" if pos.side == "YES" else "mid_no"
+        mid = tick.get(mid_key)
+        if mid is not None and pos.exit_target is not None:
+            if mid >= pos.exit_target:
+                exit_price = pos.exit_target  # maker fill at target
+                pnl = self._compute_pnl(pos, exit_price, is_maker=True)
+                self._record_trade(pos, exit_price, "MAKER", pnl, tick_idx)
+                return Signal(
+                    action="EXIT", side=pos.side,
+                    reason=f"target_hit mid={mid:.4f} target={pos.exit_target:.4f}",
+                    exit_price=exit_price, size=pos.size, tick_idx=tick_idx,
+                )
+
+        # --- Exit by stop-loss ---
+        bid_key_sl = f"{'yes' if pos.side == 'YES' else 'no'}_vwap_bid_100"
+        current_bid = tick.get(bid_key_sl)
+        if current_bid is None:
+            current_bid = tick.get(f"pm_{'yes' if pos.side == 'YES' else 'no'}_best_bid")
+        if current_bid is not None:
+            unrealized_loss = pos.entry_price - current_bid  # positive = losing
+            if unrealized_loss >= self.cfg.stop_loss_per_contract:
+                pnl = self._compute_pnl(pos, current_bid, is_maker=False)
+                self._record_trade(pos, current_bid, "STOP_LOSS", pnl, tick_idx)
+                return Signal(
+                    action="EXIT", side=pos.side,
+                    reason=f"stop_loss loss={unrealized_loss:.4f}/contract",
+                    exit_price=current_bid, size=pos.size, tick_idx=tick_idx,
+                )
+
+        # --- Exit by timeout ---
+        if pos.hold_ticks >= self.cfg.max_hold_ticks:
+            bid_key = f"{'yes' if pos.side == 'YES' else 'no'}_vwap_bid_100"
+            exit_price = tick.get(bid_key)
+            if exit_price is None:
+                bid_key2 = f"pm_{'yes' if pos.side == 'YES' else 'no'}_best_bid"
+                exit_price = tick.get(bid_key2)
+            if exit_price is None:
+                exit_price = pos.entry_price  # worst case: flat
+            pnl = self._compute_pnl(pos, exit_price, is_maker=False)
+            self._record_trade(pos, exit_price, "TIMEOUT", pnl, tick_idx)
+            return Signal(
+                action="EXIT", side=pos.side,
+                reason=f"timeout hold={pos.hold_ticks}",
+                exit_price=exit_price, size=pos.size, tick_idx=tick_idx,
+            )
+
+        return None  # still holding
 
     # ------------------------------------------------------------------
     # Entry logic
@@ -233,10 +347,6 @@ class StrategyEngine:
             return Signal(action="NONE", side="", reason="no_edge_score")
 
         # Probability sensitivity: how much PM mid moves per $1 BTC
-        # Near 0.50 -> max sensitivity (~0.001/$ BTC)
-        # Near 0.10 or 0.90 -> low sensitivity (~0.0002/$ BTC)
-        # Use parabolic: sensitivity = base * 4 * mid * (1 - mid)
-        # At mid=0.50: 4*0.5*0.5 = 1.0x  At mid=0.20: 4*0.2*0.8 = 0.64x
         prob_sensitivity = 4.0 * mid * (1.0 - mid) if mid is not None else 0.5
         btc_to_pm_rate = cfg.btc_to_pm_base_rate * prob_sensitivity
 
@@ -259,8 +369,15 @@ class StrategyEngine:
         # 16. Determine size
         size = min(cfg.base_size_contracts, cfg.max_position_contracts)
 
+        # 17. Check exposure limit with new position
+        new_exposure = entry_price * size
+        total_exposure = sum(p.entry_price * p.size for p in self._positions) + new_exposure
+        max_exposure = cfg.initial_bankroll * cfg.max_exposure_frac
+        if total_exposure > max_exposure:
+            return Signal(action="NONE", side="", reason="max_exposure")
+
         # --- CREATE POSITION ---
-        self._position = Position(
+        pos = Position(
             side=side,
             entry_price=entry_price,
             size=size,
@@ -268,13 +385,14 @@ class StrategyEngine:
             condition_id=tick.get("condition_id", ""),
             exit_target=exit_target,
         )
+        self._positions.append(pos)
         self._last_entry_tick_idx = tick_idx
 
         action = "BUY_YES" if side == "YES" else "BUY_NO"
         return Signal(
             action=action,
             side=side,
-            reason=f"lag={bn_move:.1f} zs={zscore:.2f} tw={time_weight:.2f}",
+            reason=f"lag={bn_move:.1f} zs={zscore:.2f} tw={time_weight:.2f} pos={len(self._positions)}",
             entry_price=entry_price,
             exit_target=exit_target,
             size=size,
@@ -284,111 +402,14 @@ class StrategyEngine:
         )
 
     # ------------------------------------------------------------------
-    # Exit logic
-    # ------------------------------------------------------------------
-
-    def _check_exit(self, tick: dict, tick_idx: int) -> Signal:
-        """Check if we should exit the current position."""
-        pos = self._position
-        assert pos is not None
-        pos.hold_ticks += 1
-
-        tte_ms = tick.get("time_to_expiry_ms")
-        tte_s = (tte_ms / 1000.0) if tte_ms is not None else 999.0
-
-        # --- Hold to expiry ---
-        dist = tick.get("distance_to_strike")
-        if tte_s < 10.0 and dist is not None:
-            if (pos.side == "YES" and dist > self.cfg.hold_to_expiry_distance) or \
-               (pos.side == "NO" and dist < -self.cfg.hold_to_expiry_distance):
-                return Signal(
-                    action="HOLD_TO_EXPIRY", side=pos.side,
-                    reason=f"dist={dist:.1f} tte={tte_s:.1f}s",
-                    exit_price=1.0,  # will settle at $1.00
-                    size=pos.size, tick_idx=tick_idx,
-                )
-
-        # --- Exit by target (maker) ---
-        mid_key = "mid_yes" if pos.side == "YES" else "mid_no"
-        mid = tick.get(mid_key)
-        if mid is not None and pos.exit_target is not None:
-            if mid >= pos.exit_target:
-                exit_price = pos.exit_target  # maker fill at target
-                pnl = self._compute_pnl(pos, exit_price, is_maker=True)
-                self._record_trade(pos, exit_price, "MAKER", pnl, tick_idx)
-                return Signal(
-                    action="EXIT", side=pos.side,
-                    reason=f"target_hit mid={mid:.4f} target={pos.exit_target:.4f}",
-                    exit_price=exit_price, size=pos.size, tick_idx=tick_idx,
-                )
-
-        # --- Exit by reversal --- DISABLED: data shows reversals destroy profit
-        # 2 reversal trades lost $11.57 vs 69 maker trades that gained $14.79
-        # Keeping MAKER + TIMEOUT only until more data validates a better threshold
-        # zscore = tick.get("zscore_bn_move")
-        # if zscore is not None:
-        #     if (pos.side == "YES" and zscore < -1.5) or \
-        #        (pos.side == "NO" and zscore > 1.5):
-        #         bid_key = f"{'yes' if pos.side == 'YES' else 'no'}_vwap_bid_100"
-        #         exit_price = tick.get(bid_key)
-        #         if exit_price is None:
-        #             bid_key2 = f"pm_{'yes' if pos.side == 'YES' else 'no'}_best_bid"
-        #             exit_price = tick.get(bid_key2)
-        #         if exit_price is not None:
-        #             pnl = self._compute_pnl(pos, exit_price, is_maker=False)
-        #             self._record_trade(pos, exit_price, "REVERSAL", pnl, tick_idx)
-        #             return Signal(
-        #                 action="EXIT", side=pos.side,
-        #                 reason=f"reversal zs={zscore:.2f}",
-        #                 exit_price=exit_price, size=pos.size, tick_idx=tick_idx,
-        #             )
-
-        # --- Exit by stop-loss ---
-        # If current price moved against us by more than stop_loss_per_contract, cut
-        bid_key_sl = f"{'yes' if pos.side == 'YES' else 'no'}_vwap_bid_100"
-        current_bid = tick.get(bid_key_sl)
-        if current_bid is None:
-            current_bid = tick.get(f"pm_{'yes' if pos.side == 'YES' else 'no'}_best_bid")
-        if current_bid is not None:
-            unrealized_loss = pos.entry_price - current_bid  # positive = losing
-            if unrealized_loss >= self.cfg.stop_loss_per_contract:
-                pnl = self._compute_pnl(pos, current_bid, is_maker=False)
-                self._record_trade(pos, current_bid, "STOP_LOSS", pnl, tick_idx)
-                return Signal(
-                    action="EXIT", side=pos.side,
-                    reason=f"stop_loss loss={unrealized_loss:.4f}/contract",
-                    exit_price=current_bid, size=pos.size, tick_idx=tick_idx,
-                )
-
-        # --- Exit by timeout ---
-        if pos.hold_ticks >= self.cfg.max_hold_ticks:
-            bid_key = f"{'yes' if pos.side == 'YES' else 'no'}_vwap_bid_100"
-            exit_price = tick.get(bid_key)
-            if exit_price is None:
-                bid_key2 = f"pm_{'yes' if pos.side == 'YES' else 'no'}_best_bid"
-                exit_price = tick.get(bid_key2)
-            if exit_price is None:
-                exit_price = pos.entry_price  # worst case: flat
-            pnl = self._compute_pnl(pos, exit_price, is_maker=False)
-            self._record_trade(pos, exit_price, "TIMEOUT", pnl, tick_idx)
-            return Signal(
-                action="EXIT", side=pos.side,
-                reason=f"timeout hold={pos.hold_ticks}",
-                exit_price=exit_price, size=pos.size, tick_idx=tick_idx,
-            )
-
-        return Signal(action="NONE", side=pos.side, reason="holding")
-
-    # ------------------------------------------------------------------
     # Market rotation / settlement
     # ------------------------------------------------------------------
 
     def _handle_rotation(self, tick: dict, tick_idx: int) -> Signal:
-        """Settle any open position when market rotates."""
-        if self._position is None:
+        """Settle ALL open positions when market rotates."""
+        if not self._positions:
             return _NONE_SIGNAL
 
-        pos = self._position
         last = self._last_tick or tick
 
         # Determine settlement from last tick's distance_to_strike
@@ -403,18 +424,21 @@ class StrategyEngine:
         else:
             yes_price, no_price = 0.5, 0.5
 
-        exit_price = yes_price if pos.side == "YES" else no_price
+        last_signal = _NONE_SIGNAL
+        # Settle all positions
+        for pos in list(self._positions):
+            exit_price = yes_price if pos.side == "YES" else no_price
+            pnl = self._compute_pnl(pos, exit_price, is_maker=False, is_settlement=True)
+            exit_type = "EXPIRY_WIN" if pnl > 0 else "EXPIRY_LOSS"
+            self._record_trade(pos, exit_price, exit_type, pnl, tick_idx)
+            last_signal = Signal(
+                action="EXIT", side=pos.side,
+                reason=f"settlement dist={dist:.1f} -> {exit_type}",
+                exit_price=exit_price, size=pos.size, tick_idx=tick_idx,
+            )
 
-        # Determine if it was a win
-        pnl = self._compute_pnl(pos, exit_price, is_maker=False, is_settlement=True)
-        exit_type = "EXPIRY_WIN" if pnl > 0 else "EXPIRY_LOSS"
-        self._record_trade(pos, exit_price, exit_type, pnl, tick_idx)
-
-        return Signal(
-            action="EXIT", side=pos.side,
-            reason=f"settlement dist={dist:.1f} -> {exit_type}",
-            exit_price=exit_price, size=pos.size, tick_idx=tick_idx,
-        )
+        self._positions.clear()
+        return last_signal
 
     # ------------------------------------------------------------------
     # Helpers
@@ -454,7 +478,7 @@ class StrategyEngine:
         """Polymarket taker fee: size * price * fee_rate * (price * (1 - price))^exponent.
 
         Max effective rate = 1.56% at price=0.50 (with rate=0.25, exp=2).
-        Fee → 0 at extremes (price near 0 or 1).
+        Fee -> 0 at extremes (price near 0 or 1).
         """
         if price <= 0.0 or price >= 1.0:
             return 0.0
@@ -521,4 +545,3 @@ class StrategyEngine:
 
         self._daily_trade_count += 1
         self._daily_pnl += pnl
-        self._position = None  # close position

@@ -61,7 +61,14 @@ class StrategyConfig:
         default_factory=lambda: _env_int("LATPOLY_STRAT_BASE_SIZE", 5)
     )
     max_position_contracts: int = field(
-        default_factory=lambda: _env_int("LATPOLY_STRAT_MAX_POSITION", 25)
+        default_factory=lambda: _env_int("LATPOLY_STRAT_MAX_POSITION", 5)
+    )
+    # Multi-position: up to N concurrent positions, capped by exposure
+    max_concurrent_positions: int = field(
+        default_factory=lambda: _env_int("LATPOLY_STRAT_MAX_CONCURRENT", 10)
+    )
+    max_exposure_frac: float = field(
+        default_factory=lambda: _env_float("LATPOLY_STRAT_MAX_EXPOSURE", 0.50)  # 50% of bankroll
     )
     # Minimum shares for maker exit on Polymarket
     min_maker_size: int = field(
@@ -150,7 +157,7 @@ class StrategyConfig:
         default_factory=lambda: _env_float("LATPOLY_STRAT_BANKROLL", 100.0)
     )
     max_daily_loss: float = field(
-        default_factory=lambda: _env_float("LATPOLY_STRAT_MAX_DAILY_LOSS", 20.0)  # 20% of $100 bankroll
+        default_factory=lambda: _env_float("LATPOLY_STRAT_MAX_DAILY_LOSS", 50.0)  # 50% of $100 bankroll
     )
     max_daily_trades: int = field(
         default_factory=lambda: _env_int("LATPOLY_STRAT_MAX_DAILY_TRADES", 999_999)  # effectively unlimited
