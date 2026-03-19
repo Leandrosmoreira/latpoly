@@ -76,20 +76,23 @@ class BacktestResult:
 class Portfolio:
     """Tracks virtual cash, positions, P&L, and equity curve."""
 
-    def __init__(self, initial_cash: float = 1000.0) -> None:
+    def __init__(self, initial_cash: float = 1000.0, entry_as_maker: bool = False) -> None:
         self.initial_cash = initial_cash
         self.cash = initial_cash
+        self._entry_as_maker = entry_as_maker
         self.trades: list[Trade] = []
         self.equity_curve: list[float] = [initial_cash]
         self._peak_equity = initial_cash
         self._max_drawdown = 0.0
 
-    def record_entry(self, signal: Signal, tick: dict) -> None:
+    def record_entry(self, signal: Signal, tick: dict, entry_as_maker: bool = False) -> None:
         """Debit cash for an entry. Actual trade recording happens on exit."""
-        # Cost = entry_price * size * (1 + taker_fee)
         if signal.entry_price is None:
             return
-        cost = signal.entry_price * signal.size * (1.0 + 0.01)  # taker fee
+        if entry_as_maker:
+            cost = signal.entry_price * signal.size  # maker: 0% fee
+        else:
+            cost = signal.entry_price * signal.size * (1.0 + 0.01)  # taker fee
         self.cash -= cost
 
     def record_exit(self, engine_trade: dict, ticks: list[dict]) -> None:
@@ -102,8 +105,8 @@ class Portfolio:
         exit_type = engine_trade["exit_type"]
         pnl_net = engine_trade["pnl_net"]
 
-        # Compute entry fee
-        taker_fee = entry_price * size * 0.01
+        # Compute entry fee (0 for maker entry)
+        taker_fee = 0.0 if self._entry_as_maker else entry_price * size * 0.01
 
         # Compute exit fee (depends on type)
         if exit_type in ("EXPIRY_WIN", "EXPIRY_LOSS"):
@@ -220,7 +223,7 @@ def run_backtest(
         cfg = StrategyConfig()
 
     engine = StrategyEngine(cfg)
-    portfolio = Portfolio(initial_cash=initial_cash)
+    portfolio = Portfolio(initial_cash=initial_cash, entry_as_maker=cfg.entry_as_maker)
 
     last_processed_trade_idx = 0
     rejection_counts: dict[str, int] = defaultdict(int) if diagnostics else {}
@@ -228,7 +231,7 @@ def run_backtest(
     # Near-miss reasons: late-stage rejections that almost became trades
     _NEAR_MISS_REASONS = {"mid_out_of_range", "net_edge_too_low", "momentum_not_confirmed",
                           "spread_too_wide", "insufficient_depth", "no_ask_price",
-                          "bn_move_too_small"}
+                          "no_bid_price", "bn_move_too_small"}
 
     for idx, tick in enumerate(ticks):
         signal = engine.on_tick(tick, idx)
@@ -252,7 +255,7 @@ def run_backtest(
 
         # On entry: debit cash
         if signal.action in ("BUY_YES", "BUY_NO"):
-            portfolio.record_entry(signal, tick)
+            portfolio.record_entry(signal, tick, entry_as_maker=cfg.entry_as_maker)
 
         # Check for newly completed trades from engine
         while last_processed_trade_idx < len(engine.closed_trades):

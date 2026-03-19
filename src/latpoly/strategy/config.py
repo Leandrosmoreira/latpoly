@@ -100,6 +100,13 @@ class StrategyConfig:
         default_factory=lambda: _env_float("LATPOLY_STRAT_MIN_NET_EDGE", 0.005)
     )
 
+    # --- Entry mode ---
+    # "maker": limit order at best_bid (0% fee, better price, risk of no fill)
+    # "taker": market order at best_ask (pays taker fee, guaranteed fill)
+    entry_as_maker: bool = field(
+        default_factory=lambda: _env_bool("LATPOLY_STRAT_ENTRY_MAKER", True)
+    )
+
     # --- Cost model ---
     # Polymarket crypto fee formula: fee = size * price * fee_rate * (price * (1 - price))^fee_exponent
     # Max effective rate = 1.56% at price=0.50
@@ -140,10 +147,10 @@ class StrategyConfig:
 
     # --- Kill switches ---
     initial_bankroll: float = field(
-        default_factory=lambda: _env_float("LATPOLY_STRAT_BANKROLL", 50.0)
+        default_factory=lambda: _env_float("LATPOLY_STRAT_BANKROLL", 100.0)
     )
     max_daily_loss: float = field(
-        default_factory=lambda: _env_float("LATPOLY_STRAT_MAX_DAILY_LOSS", 10.0)  # 20% of $50 bankroll
+        default_factory=lambda: _env_float("LATPOLY_STRAT_MAX_DAILY_LOSS", 20.0)  # 20% of $100 bankroll
     )
     max_daily_trades: int = field(
         default_factory=lambda: _env_int("LATPOLY_STRAT_MAX_DAILY_TRADES", 999_999)  # effectively unlimited

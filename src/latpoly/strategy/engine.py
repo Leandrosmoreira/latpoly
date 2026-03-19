@@ -201,22 +201,33 @@ class StrategyEngine:
         if depth is not None and depth < cfg.min_depth_contracts:
             return Signal(action="NONE", side="", reason="insufficient_depth")
 
-        # 11. Compute entry price from VWAP (realistic slippage)
+        # 11. Compute entry price
         prefix = "yes" if side == "YES" else "no"
-        vwap_key = f"{prefix}_vwap_ask_100"
-        entry_price = tick.get(vwap_key)
-        if entry_price is None:
-            # Fallback to best ask
-            ask_key = f"pm_{prefix}_best_ask"
-            entry_price = tick.get(ask_key)
-        if entry_price is None:
-            return Signal(action="NONE", side="", reason="no_ask_price")
 
-        # 12. Compute slippage cost
-        slip_key = f"{prefix}_slippage_ask_100"
-        slippage = tick.get(slip_key) or 0.0
+        if cfg.entry_as_maker:
+            # Maker entry: bid at best_bid (join the bid, 0% fee)
+            bid_key = f"pm_{prefix}_best_bid"
+            entry_price = tick.get(bid_key)
+            if entry_price is None:
+                return Signal(action="NONE", side="", reason="no_bid_price")
+            slippage = 0.0
+            entry_fee_per_contract = 0.0
+        else:
+            # Taker entry: hit the ask (VWAP for realistic slippage)
+            vwap_key = f"{prefix}_vwap_ask_100"
+            entry_price = tick.get(vwap_key)
+            if entry_price is None:
+                ask_key = f"pm_{prefix}_best_ask"
+                entry_price = tick.get(ask_key)
+            if entry_price is None:
+                return Signal(action="NONE", side="", reason="no_ask_price")
+            slip_key = f"{prefix}_slippage_ask_100"
+            slippage = tick.get(slip_key) or 0.0
+            entry_fee_per_contract = self.compute_taker_fee(
+                entry_price, 1, cfg.taker_fee_rate, cfg.taker_fee_exponent
+            )
 
-        # 13. Compute net edge
+        # 12. Compute net edge
         edge_score = tick.get("edge_score")
         if edge_score is None:
             return Signal(action="NONE", side="", reason="no_edge_score")
@@ -230,10 +241,6 @@ class StrategyEngine:
         btc_to_pm_rate = cfg.btc_to_pm_base_rate * prob_sensitivity
 
         pm_edge_estimate = bn_move_abs * btc_to_pm_rate
-        # Real Polymarket fee formula for entry
-        entry_fee_per_contract = self.compute_taker_fee(
-            entry_price, 1, cfg.taker_fee_rate, cfg.taker_fee_exponent
-        )
         net_edge = pm_edge_estimate - slippage - entry_fee_per_contract
 
         # 14. Time weight
@@ -463,8 +470,8 @@ class StrategyEngine:
     ) -> float:
         """Compute net P&L for closing a position.
 
-        Entry is always taker (pays real Polymarket fee formula).
-        Exit is maker (0% fee) for target fills, taker for timeout/stop.
+        Entry: maker (0% fee) or taker (pays real Polymarket fee formula).
+        Exit: maker (0% fee) for target fills, taker for timeout/stop.
         Settlement has no fees.
 
         Polymarket rule: maker orders require min_maker_size shares.
@@ -472,10 +479,13 @@ class StrategyEngine:
         """
         cfg = self.cfg
 
-        # Entry cost: price * size + taker fee
-        entry_fee = self.compute_taker_fee(
-            pos.entry_price, pos.size, cfg.taker_fee_rate, cfg.taker_fee_exponent
-        )
+        # Entry cost: price * size + fee (0 for maker entry)
+        if cfg.entry_as_maker:
+            entry_fee = 0.0
+        else:
+            entry_fee = self.compute_taker_fee(
+                pos.entry_price, pos.size, cfg.taker_fee_rate, cfg.taker_fee_exponent
+            )
         entry_cost = pos.entry_price * pos.size + entry_fee
 
         if is_settlement:
