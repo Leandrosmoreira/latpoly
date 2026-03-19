@@ -230,7 +230,11 @@ class StrategyEngine:
         btc_to_pm_rate = cfg.btc_to_pm_base_rate * prob_sensitivity
 
         pm_edge_estimate = bn_move_abs * btc_to_pm_rate
-        net_edge = pm_edge_estimate - slippage - (entry_price * cfg.taker_fee_rate)
+        # Real Polymarket fee formula for entry
+        entry_fee_per_contract = self.compute_taker_fee(
+            entry_price, 1, cfg.taker_fee_rate, cfg.taker_fee_exponent
+        )
+        net_edge = pm_edge_estimate - slippage - entry_fee_per_contract
 
         # 14. Time weight
         time_weight = self._compute_time_weight(tte_s)
@@ -438,6 +442,18 @@ class StrategyEngine:
         target_profit = max(0.005, min(target_profit, 0.05))  # clamp
         return entry_price + target_profit
 
+    @staticmethod
+    def compute_taker_fee(price: float, size: int, fee_rate: float, fee_exp: float) -> float:
+        """Polymarket taker fee: size * price * fee_rate * (price * (1 - price))^exponent.
+
+        Max effective rate = 1.56% at price=0.50 (with rate=0.25, exp=2).
+        Fee → 0 at extremes (price near 0 or 1).
+        """
+        if price <= 0.0 or price >= 1.0:
+            return 0.0
+        fee = size * price * fee_rate * (price * (1.0 - price)) ** fee_exp
+        return round(fee, 4)  # Polymarket rounds to 4 decimal places
+
     def _compute_pnl(
         self,
         pos: Position,
@@ -447,24 +463,32 @@ class StrategyEngine:
     ) -> float:
         """Compute net P&L for closing a position.
 
-        Entry is always taker (pays taker_fee_rate).
-        Exit is maker (0% fee) for target fills, taker for timeout/reversal.
+        Entry is always taker (pays real Polymarket fee formula).
+        Exit is maker (0% fee) for target fills, taker for timeout/stop.
         Settlement has no fees.
 
         Polymarket rule: maker orders require min_maker_size shares.
-        If position < min_maker_size, forced to exit as taker (1% fee).
+        If position < min_maker_size, forced to exit as taker.
         """
         cfg = self.cfg
-        entry_cost = pos.entry_price * pos.size * (1.0 + cfg.taker_fee_rate)
+
+        # Entry cost: price * size + taker fee
+        entry_fee = self.compute_taker_fee(
+            pos.entry_price, pos.size, cfg.taker_fee_rate, cfg.taker_fee_exponent
+        )
+        entry_cost = pos.entry_price * pos.size + entry_fee
 
         if is_settlement:
             exit_revenue = exit_price * pos.size
         elif is_maker and pos.size >= cfg.min_maker_size:
-            # Maker exit: 0% fee (normal case)
-            exit_revenue = exit_price * pos.size * (1.0 - cfg.maker_fee_rate)
+            # Maker exit: 0% fee
+            exit_revenue = exit_price * pos.size
         else:
-            # Taker exit: 1% fee (forced if size < min_maker_size)
-            exit_revenue = exit_price * pos.size * (1.0 - cfg.taker_fee_rate)
+            # Taker exit: real fee formula
+            exit_fee = self.compute_taker_fee(
+                exit_price, pos.size, cfg.taker_fee_rate, cfg.taker_fee_exponent
+            )
+            exit_revenue = exit_price * pos.size - exit_fee
 
         return exit_revenue - entry_cost
 

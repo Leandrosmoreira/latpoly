@@ -101,8 +101,14 @@ class StrategyConfig:
     )
 
     # --- Cost model ---
+    # Polymarket crypto fee formula: fee = size * price * fee_rate * (price * (1 - price))^fee_exponent
+    # Max effective rate = 1.56% at price=0.50
+    # Maker: 0% fee (+ 20% rebate from taker fees, ignored in backtest)
     taker_fee_rate: float = field(
-        default_factory=lambda: _env_float("LATPOLY_STRAT_TAKER_FEE", 0.01)
+        default_factory=lambda: _env_float("LATPOLY_STRAT_TAKER_FEE_RATE", 0.25)
+    )
+    taker_fee_exponent: float = field(
+        default_factory=lambda: _env_float("LATPOLY_STRAT_TAKER_FEE_EXP", 2.0)
     )
     maker_fee_rate: float = field(
         default_factory=lambda: _env_float("LATPOLY_STRAT_MAKER_FEE", 0.0)
