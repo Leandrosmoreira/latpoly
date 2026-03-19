@@ -146,5 +146,5 @@ class StrategyConfig:
         default_factory=lambda: _env_float("LATPOLY_STRAT_MAX_DAILY_LOSS", 10.0)  # 20% of $50 bankroll
     )
     max_daily_trades: int = field(
-        default_factory=lambda: _env_int("LATPOLY_STRAT_MAX_DAILY_TRADES", 500)  # was 200, hitting cap
+        default_factory=lambda: _env_int("LATPOLY_STRAT_MAX_DAILY_TRADES", 999_999)  # effectively unlimited
     )

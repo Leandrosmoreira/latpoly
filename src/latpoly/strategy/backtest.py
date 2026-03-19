@@ -487,10 +487,12 @@ def main() -> None:
     args = sys.argv[1:]
 
     if not args or args[0] in ("-h", "--help"):
-        print("Usage: python -m latpoly.strategy.backtest <file.jsonl> [file2.jsonl ...] [--sweep]")
+        print("Usage: python -m latpoly.strategy.backtest <file.jsonl> [file2.jsonl ...] [--sweep] [--slot=btc-15m]")
         print()
         print("Options:")
-        print("  --sweep    Run parameter sweep (tests multiple threshold combos)")
+        print("  --sweep          Run parameter sweep (tests multiple threshold combos)")
+        print("  --diag           Show rejection reasons and near-miss analysis")
+        print("  --slot=SLOT_ID   Filter ticks by slot_id (e.g. --slot=btc-15m)")
         print()
         print("Environment variables (override defaults):")
         print("  LATPOLY_STRAT_ZSCORE_THRESHOLD  Z-score entry threshold (default: 2.0)")
@@ -505,6 +507,13 @@ def main() -> None:
 
     do_sweep = "--sweep" in args
     do_diag = "--diag" in args
+
+    # --slot filter: only keep ticks matching this slot_id (or ticks without slot_id for legacy data)
+    slot_filter = None
+    for a in args:
+        if a.startswith("--slot="):
+            slot_filter = a.split("=", 1)[1]
+
     file_args = [a for a in args if not a.startswith("--")]
 
     if not file_args:
@@ -515,6 +524,11 @@ def main() -> None:
     print(f"Loading ticks from {len(file_args)} file(s)...")
     ticks = load_ticks(file_args)
     print(f"Loaded {len(ticks):,} ticks")
+
+    if slot_filter:
+        # Keep ticks matching the slot OR legacy ticks (no slot_id field = old btc-15m data)
+        ticks = [t for t in ticks if t.get("slot_id", slot_filter) == slot_filter]
+        print(f"Filtered to slot '{slot_filter}': {len(ticks):,} ticks")
 
     if not ticks:
         print("No ticks loaded. Check file paths.")
