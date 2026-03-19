@@ -270,38 +270,55 @@ async def paper_trader_worker(
 
     log.info("Paper trader ready — running on live data (%d slots)", len(slot_ids))
 
+    consecutive_errors = 0
+    max_consecutive_errors = 50
+
     try:
         while not state.shutdown.is_set():
             t0 = asyncio.get_event_loop().time()
 
-            for slot_def in cfg.market_slots:
-                sid = slot_def.slot_id
-                bn = state.get_binance(slot_def.binance_symbol)
-                pm = state.get_polymarket(sid)
+            try:
+                for slot_def in cfg.market_slots:
+                    sid = slot_def.slot_id
+                    bn = state.get_binance(slot_def.binance_symbol)
+                    pm = state.get_polymarket(sid)
 
-                # Skip slots that aren't ready
-                if bn.best_bid is None or pm.yes_best_bid is None:
-                    continue
+                    # Skip slots that aren't ready
+                    if bn.best_bid is None or pm.yes_best_bid is None:
+                        continue
 
-                ss = slot_signal_states[sid]
+                    ss = slot_signal_states[sid]
 
-                # Market rotation
-                cid = pm.market.condition_id
-                if cid != ss.last_condition_id:
-                    ss.clear()
-                    ss.last_condition_id = cid
-                    log.info("Paper trader [%s]: market rotated", sid)
+                    # Market rotation
+                    cid = pm.market.condition_id
+                    if cid != ss.last_condition_id:
+                        ss.clear()
+                        ss.last_condition_id = cid
+                        log.info("Paper trader [%s]: market rotated", sid)
 
-                # Build tick
-                tick = build_normalized_tick(
-                    bn, pm,
-                    ss.price_history, ss.poly_tracker,
-                    ss.zscore_bn_move, ss.zscore_ret1s,
-                )
-                tick["slot_id"] = sid
+                    # Build tick
+                    tick = build_normalized_tick(
+                        bn, pm,
+                        ss.price_history, ss.poly_tracker,
+                        ss.zscore_bn_move, ss.zscore_ret1s,
+                    )
+                    tick["slot_id"] = sid
 
-                # Feed to strategy
-                trader.on_tick(tick)
+                    # Feed to strategy
+                    trader.on_tick(tick)
+
+                consecutive_errors = 0  # reset on success
+
+            except asyncio.CancelledError:
+                raise  # re-raise cancellation
+            except Exception:
+                consecutive_errors += 1
+                if consecutive_errors <= 5 or consecutive_errors % 100 == 0:
+                    log.exception("Paper trader tick error (#%d)", consecutive_errors)
+                if consecutive_errors >= max_consecutive_errors:
+                    log.error("Paper trader: too many consecutive errors (%d), stopping",
+                              consecutive_errors)
+                    break
 
             # Periodic summary
             now = time.time()

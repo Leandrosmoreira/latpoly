@@ -62,8 +62,16 @@ async def _run(cfg: Config) -> None:
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, _shutdown_signal)
 
-    # Wait for shutdown event
-    await state.shutdown.wait()
+    # Monitor tasks for crashes while waiting for shutdown
+    while not state.shutdown.is_set():
+        await asyncio.sleep(5.0)
+        for t in tasks:
+            if t.done() and not t.cancelled():
+                exc = t.exception()
+                if exc is not None:
+                    log.error("Worker %s crashed: %s: %s", t.get_name(),
+                              type(exc).__name__, exc)
+
     log.info("Shutting down workers...")
 
     # Cancel all tasks

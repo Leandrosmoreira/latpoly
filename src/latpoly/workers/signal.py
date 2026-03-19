@@ -761,46 +761,61 @@ async def signal_worker(
 
     log.info("Signal worker ready — at least one slot has data")
 
+    consecutive_errors = 0
+
     try:
         while not state.shutdown.is_set():
             t0 = asyncio.get_event_loop().time()
 
-            for slot_def in slots:
-                sid = slot_def.slot_id
-                bn = state.get_binance(slot_def.binance_symbol)
-                pm = state.get_polymarket(sid)
+            try:
+                for slot_def in slots:
+                    sid = slot_def.slot_id
+                    bn = state.get_binance(slot_def.binance_symbol)
+                    pm = state.get_polymarket(sid)
 
-                # Skip slots that aren't ready yet
-                if bn.best_bid is None or pm.yes_best_bid is None:
-                    continue
+                    # Skip slots that aren't ready yet
+                    if bn.best_bid is None or pm.yes_best_bid is None:
+                        continue
 
-                ss = slot_states[sid]
+                    ss = slot_states[sid]
 
-                # Clear history on market rotation
-                cid = pm.market.condition_id
-                if cid != ss.last_condition_id:
-                    ss.clear()
-                    ss.last_condition_id = cid
-                    log.info("Signal worker [%s]: market rotated, history cleared", sid)
+                    # Clear history on market rotation
+                    cid = pm.market.condition_id
+                    if cid != ss.last_condition_id:
+                        ss.clear()
+                        ss.last_condition_id = cid
+                        log.info("Signal worker [%s]: market rotated, history cleared", sid)
 
-                tick = build_normalized_tick(
-                    bn, pm,
-                    ss.price_history, ss.poly_tracker,
-                    ss.zscore_bn_move, ss.zscore_ret1s,
-                )
-                tick["slot_id"] = sid
+                    tick = build_normalized_tick(
+                        bn, pm,
+                        ss.price_history, ss.poly_tracker,
+                        ss.zscore_bn_move, ss.zscore_ret1s,
+                    )
+                    tick["slot_id"] = sid
 
-                # Enqueue with drop-oldest if full
-                try:
-                    out_queue.put_nowait(tick)
-                except asyncio.QueueFull:
+                    # Enqueue with drop-oldest if full
                     try:
-                        out_queue.get_nowait()
-                    except asyncio.QueueEmpty:
-                        pass
-                    out_queue.put_nowait(tick)
+                        out_queue.put_nowait(tick)
+                    except asyncio.QueueFull:
+                        try:
+                            out_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            pass
+                        out_queue.put_nowait(tick)
 
-                state.signal_tick_count += 1
+                    state.signal_tick_count += 1
+
+                consecutive_errors = 0
+
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                consecutive_errors += 1
+                if consecutive_errors <= 5 or consecutive_errors % 100 == 0:
+                    log.exception("Signal worker tick error (#%d)", consecutive_errors)
+                if consecutive_errors >= 50:
+                    log.error("Signal worker: too many consecutive errors, stopping")
+                    break
 
             elapsed = asyncio.get_event_loop().time() - t0
             await asyncio.sleep(max(0.0, interval - elapsed))
