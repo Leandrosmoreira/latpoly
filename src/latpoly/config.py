@@ -133,6 +133,11 @@ class Config:
         default_factory=lambda: _env_float("LATPOLY_HEALTH_INTERVAL", 10.0)
     )
 
+    # Trading mode: "paper" (default, no real orders) or "live" (real orders)
+    trading_mode: str = field(
+        default_factory=lambda: _env("LATPOLY_TRADING_MODE", "paper")
+    )
+
     # Logging
     log_level: str = field(
         default_factory=lambda: _env("LATPOLY_LOG_LEVEL", "INFO")

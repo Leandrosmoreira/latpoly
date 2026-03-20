@@ -7,6 +7,7 @@ dependencies = [
     "websockets>=13.0",
     "orjson>=3.10",
     "aiohttp>=3.9",
+    "py-clob-client>=0.18.0",
 ]
 
 [project.optional-dependencies]

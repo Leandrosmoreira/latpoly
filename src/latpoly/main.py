@@ -6,6 +6,7 @@ import asyncio
 import logging
 import signal
 import sys
+from typing import Optional
 
 from latpoly.config import Config
 from latpoly.loop_setup import configure_loop
@@ -48,7 +49,20 @@ async def _run(cfg: Config) -> None:
     # Shared workers
     tasks.append(asyncio.create_task(signal_worker(cfg, state, writer_queue), name="W3-signal"))
     tasks.append(asyncio.create_task(writer_worker(cfg, state, writer_queue), name="W4-writer"))
-    tasks.append(asyncio.create_task(paper_trader_worker(cfg, state, writer_queue), name="W5-paper"))
+
+    # W5: paper or live trader based on config
+    if cfg.trading_mode == "live":
+        from latpoly.workers.live_trader import live_trader_worker
+        tasks.append(
+            asyncio.create_task(live_trader_worker(cfg, state, writer_queue), name="W5-live")
+        )
+        log.info("Trading mode: LIVE (real orders on Polymarket)")
+    else:
+        tasks.append(
+            asyncio.create_task(paper_trader_worker(cfg, state, writer_queue), name="W5-paper")
+        )
+        log.info("Trading mode: PAPER (no real orders)")
+
     tasks.append(asyncio.create_task(health_loop(cfg, state, writer_queue), name="health"))
 
     # Shutdown handler
@@ -79,6 +93,9 @@ async def _run(cfg: Config) -> None:
                 return asyncio.create_task(_pw(cfg, state, slot), name=name)
         if name == "W5-paper":
             return asyncio.create_task(_pt(cfg, state, writer_queue), name=name)
+        if name == "W5-live":
+            from latpoly.workers.live_trader import live_trader_worker as _lt
+            return asyncio.create_task(_lt(cfg, state, writer_queue), name=name)
         return None
 
     # Monitor tasks for crashes — restart critical workers
@@ -122,8 +139,8 @@ def entry() -> None:
     cfg = Config()
     slots = cfg.market_slots
     log.info(
-        "Config: %d market slots, %d binance symbols, signal_interval=%.2fs",
-        len(slots), len(cfg.binance_symbols), cfg.signal_interval,
+        "Config: %d market slots, %d binance symbols, signal_interval=%.2fs, mode=%s",
+        len(slots), len(cfg.binance_symbols), cfg.signal_interval, cfg.trading_mode,
     )
     for slot in slots:
         log.info("  Slot: %s (%s / %s / %ss)", slot.slot_id, slot.binance_symbol,
