@@ -12,6 +12,7 @@ dependencies = [
 
 [project.optional-dependencies]
 linux = ["uvloop>=0.20"]
+optimize = ["optuna>=3.6"]
 
 [project.scripts]
 latpoly = "latpoly.main:entry"

@@ -533,6 +533,8 @@ def main() -> None:
         print()
         print("Options:")
         print("  --sweep          Run parameter sweep (tests multiple threshold combos)")
+        print("  --optimize       Run Optuna TPE optimization (requires: pip install -e '.[optimize]')")
+        print("  --n-trials=N     Number of Optuna trials (default: 200, used with --optimize)")
         print("  --diag           Show rejection reasons and near-miss analysis")
         print("  --slot=SLOT_ID   Filter ticks by slot_id (e.g. --slot=btc-15m)")
         print()
@@ -549,6 +551,13 @@ def main() -> None:
 
     do_sweep = "--sweep" in args
     do_diag = "--diag" in args
+    do_optimize = "--optimize" in args
+
+    # Parse --n-trials for optimize mode
+    n_trials = 200
+    for a in args:
+        if a.startswith("--n-trials="):
+            n_trials = int(a.split("=", 1)[1])
 
     # --slot filter: only keep ticks matching this slot_id (or ticks without slot_id for legacy data)
     slot_filter = None
@@ -575,7 +584,11 @@ def main() -> None:
         print("No ticks loaded. Check file paths.")
         sys.exit(1)
 
-    if do_sweep:
+    if do_optimize:
+        from latpoly.strategy.optimize import run_optimize, print_optimize_report
+        study = run_optimize(ticks, n_trials=n_trials)
+        print_optimize_report(study)
+    elif do_sweep:
         results = run_sweep(ticks)
         print_sweep_report(results)
     else:
