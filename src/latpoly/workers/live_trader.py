@@ -5,11 +5,13 @@ Only operates on BTC slots (filters out ETH due to low liquidity).
 
 Order lifecycle:
 1. Engine BUY signal  -> place GTC limit BUY at entry_price (maker)
-2. Engine EXIT signal -> try cancel entry order:
-   - "canceled"        -> entry never filled, done (no cost)
-   - "matched"/"gone"  -> entry was filled, place SELL at exit_price
-3. Market rotation     -> cancel all pending orders for slot
-4. Shutdown            -> cancel ALL orders globally
+2. Freeze slot for MIN_ORDER_LIFETIME_S (don't feed engine, let order fill)
+3. After freeze, cancel order to check fill status:
+   - "canceled"        -> entry never filled, engine resets, done
+   - "matched"/"gone"  -> entry filled, resume engine, wait for EXIT signal
+4. Engine EXIT signal  -> place SELL at exit_price
+5. Market rotation     -> cancel all pending orders for slot
+6. Shutdown            -> cancel ALL orders globally
 
 Logs trades to data/live/ in same JSONL format as paper_trader.
 """
@@ -20,6 +22,7 @@ import asyncio
 import json
 import logging
 import math
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,6 +38,11 @@ log = logging.getLogger(__name__)
 
 # Polymarket tick size for crypto up/down markets
 TICK_SIZE = 0.01
+
+# Minimum seconds an entry order must live before we check fill status.
+# Without this, the engine exits on the very next tick (~0.2s) and the
+# maker order never has time to fill on the exchange.
+MIN_ORDER_LIFETIME_S = float(os.environ.get("LATPOLY_MIN_ORDER_LIFE", "15"))
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +89,11 @@ class LiveTrader:
 
     Uses the same StrategyEngine as paper_trader. The engine tracks virtual
     positions; this class shadows them with real Polymarket orders.
+
+    Key design: when an entry order is placed, we FREEZE the slot (don't
+    feed ticks to the engine) for MIN_ORDER_LIFETIME_S seconds. This gives
+    the maker order time to fill. After the freeze, we check fill status
+    and either resume the engine (if filled) or reset (if not filled).
     """
 
     def __init__(
@@ -104,8 +117,11 @@ class LiveTrader:
         self._signal_file: Optional[IO] = None
         self._current_date: str = ""
 
-        # Real order tracking: slot_id -> latest entry order
+        # Real order tracking: slot_id -> pending entry order
         self._entry_orders: dict[str, TrackedEntry] = {}
+
+        # Filled positions: slot_id -> entry that was confirmed filled
+        self._filled_positions: dict[str, TrackedEntry] = {}
 
         # Background tasks for async order placement
         self._pending_tasks: list[asyncio.Task] = []
@@ -173,7 +189,41 @@ class LiveTrader:
         self._tick_idx[slot_id] = self._tick_idx.get(slot_id, 0) + 1
         tick_idx = self._tick_idx[slot_id]
 
-        # Run strategy engine (same as paper trader)
+        # ── PHASE 1: Check pending entry orders ──────────────────────
+        pending = self._entry_orders.get(slot_id)
+        if pending is not None:
+            age = time.time() - pending.created_at
+            if age < MIN_ORDER_LIFETIME_S:
+                # Order still young — don't feed engine, let it fill
+                return Signal(action="NONE", side="", reason="order_pending")
+
+            # Order is old enough — check fill status via cancel
+            result = await self._poly.cancel_order(pending.order_id)
+            self._entry_orders.pop(slot_id, None)
+
+            if result in ("matched", "gone", "failed"):
+                # Entry was FILLED — we have real shares now
+                self._orders_filled += 1
+                self._filled_positions[slot_id] = pending
+                log.info(
+                    "📥 [%s] Entry FILLED after %.1fs (cancel=%s) — "
+                    "holding %s @ $%.2f sz=%d",
+                    slot_id, age, result,
+                    pending.side, pending.price, pending.size,
+                )
+            else:
+                # Entry NOT filled — cancel succeeded
+                self._orders_cancelled += 1
+                log.info(
+                    "📥 [%s] Entry NOT filled after %.1fs — cancelled. "
+                    "Resetting engine.",
+                    slot_id, age,
+                )
+                # Reset the engine so it doesn't think it has a position
+                self._engines[slot_id] = StrategyEngine(self.strat_cfg)
+                return Signal(action="NONE", side="", reason="entry_cancelled")
+
+        # ── PHASE 2: Run strategy engine ─────────────────────────────
         signal = engine.on_tick(tick, tick_idx)
 
         if signal.action == "NONE":
@@ -181,14 +231,17 @@ class LiveTrader:
 
         now_iso = time.strftime("%H:%M:%S", time.gmtime())
 
-        # --- ENTRY ---
+        # ── PHASE 3: Handle ENTRY signals ────────────────────────────
         if signal.action in ("BUY_YES", "BUY_NO"):
+            # Don't enter if we already have a filled position on this slot
+            if slot_id in self._filled_positions:
+                return Signal(action="NONE", side="", reason="already_filled")
+
             token_id = self._get_token_id(state, slot_id, signal.side)
             if not token_id:
                 log.warning("[%s] No token_id for %s — skipping entry", slot_id, signal.side)
                 return signal
 
-            # Entry price from engine is already best_bid (on the tick grid)
             entry_price = round(signal.entry_price, 2)
 
             log.info(
@@ -210,13 +263,13 @@ class LiveTrader:
                 "tick_idx": tick_idx,
             })
 
-            # Place real BUY order (await to ensure it's tracked before exit)
+            # Place real BUY order (await to ensure it's tracked)
             await self._place_entry(
                 slot_id, token_id, signal.side,
                 entry_price, signal.size, tick_idx,
             )
 
-        # --- EXIT ---
+        # ── PHASE 4: Handle EXIT signals ─────────────────────────────
         elif signal.action == "EXIT":
             trades = engine.closed_trades
             if trades:
@@ -254,18 +307,33 @@ class LiveTrader:
                     "session_win_rate": round(wr, 1),
                 })
 
-                # Compute real exit price (rounded to tick grid)
-                exit_price = self._compute_real_exit_price(last_trade)
-                token_id = self._get_token_id(state, slot_id, signal.side)
-
-                # Handle real exit order (async)
-                task = asyncio.create_task(
-                    self._handle_exit(
-                        slot_id, token_id, exit_price,
-                        signal.size, last_trade["exit_type"],
+                # If we have a real filled position, place SELL
+                filled = self._filled_positions.pop(slot_id, None)
+                if filled is not None:
+                    exit_price = self._compute_real_exit_price(last_trade)
+                    log.info(
+                        "📤 [%s] Placing exit SELL @ $%.2f (entry was $%.2f)",
+                        slot_id, exit_price, filled.price,
                     )
-                )
-                self._pending_tasks.append(task)
+                    sell_oid = await self._poly.place_limit_sell(
+                        filled.token_id, exit_price, filled.size,
+                    )
+                    if sell_oid:
+                        log.info(
+                            "📤 [%s] Exit SELL placed: %s @ $%.2f",
+                            slot_id, sell_oid[:16], exit_price,
+                        )
+                    else:
+                        log.error(
+                            "📤 [%s] Exit SELL FAILED @ $%.2f — shares may be stuck!",
+                            slot_id, exit_price,
+                        )
+                else:
+                    # No real position — engine-only trade (entry wasn't filled)
+                    log.info(
+                        "📥 [%s] Engine EXIT but no filled position (virtual only)",
+                        slot_id,
+                    )
 
         elif signal.action == "HOLD_TO_EXPIRY":
             log.info(
@@ -329,75 +397,12 @@ class LiveTrader:
             )
             self._orders_placed += 1
             log.info(
-                "\U0001f4e4 [%s] Entry order placed: %s @ $%.2f sz=%d",
-                slot_id, oid[:16], price, size,
+                "\U0001f4e4 [%s] Entry order placed: %s @ $%.2f sz=%d  "
+                "(will check fill in %.0fs)",
+                slot_id, oid[:16], price, size, MIN_ORDER_LIFETIME_S,
             )
         else:
             log.warning("\U0001f4e4 [%s] Entry order FAILED to place", slot_id)
-
-    async def _handle_exit(
-        self,
-        slot_id: str,
-        token_id: str,
-        exit_price: float,
-        size: int,
-        exit_type: str,
-    ) -> None:
-        """Handle exit: cancel entry if pending, place sell if filled."""
-        entry = self._entry_orders.pop(slot_id, None)
-
-        if entry is None:
-            # No tracked entry — might have been cleared by rotation
-            log.info("\U0001f4e5 [%s] Exit but no tracked entry (rotation?)", slot_id)
-            if exit_type not in ("EXPIRY_WIN", "EXPIRY_LOSS"):
-                # Try to sell in case we have shares from an earlier fill
-                sell_oid = await self._poly.place_limit_sell(
-                    token_id, exit_price, size
-                )
-                if sell_oid:
-                    log.info(
-                        "\U0001f4e5 [%s] Speculative exit sell: %s @ $%.2f",
-                        slot_id, sell_oid[:16], exit_price,
-                    )
-            return
-
-        # Try to cancel the entry order to determine if it was filled
-        result = await self._poly.cancel_order(entry.order_id)
-        log.info(
-            "\U0001f4e5 [%s] Entry cancel -> %s (order=%s)",
-            slot_id, result, entry.order_id[:16],
-        )
-
-        if result == "canceled":
-            # Entry never filled — no real position to close
-            self._orders_cancelled += 1
-            log.info("\U0001f4e5 [%s] Entry NOT filled, cancelled OK", slot_id)
-            return
-
-        # Entry was filled (matched / gone / failed -> assume filled)
-        self._orders_filled += 1
-        log.info(
-            "\U0001f4e5 [%s] Entry FILLED (cancel=%s) -> placing exit sell",
-            slot_id, result,
-        )
-
-        if exit_type in ("EXPIRY_WIN", "EXPIRY_LOSS"):
-            # Market expired — Polymarket settles automatically, no sell needed
-            log.info("\U0001f4e5 [%s] Position settles at expiry", slot_id)
-            return
-
-        # Place exit SELL order
-        sell_oid = await self._poly.place_limit_sell(token_id, exit_price, size)
-        if sell_oid:
-            log.info(
-                "\U0001f4e5 [%s] Exit sell placed: %s @ $%.2f",
-                slot_id, sell_oid[:16], exit_price,
-            )
-        else:
-            log.error(
-                "\U0001f4e5 [%s] Exit sell FAILED @ $%.2f — shares may be stuck!",
-                slot_id, exit_price,
-            )
 
     # ------------------------------------------------------------------
     # Market rotation handler
@@ -405,6 +410,7 @@ class LiveTrader:
 
     async def handle_rotation(self, slot_id: str) -> None:
         """Cancel all pending orders for a slot on market rotation."""
+        # Cancel pending entry
         entry = self._entry_orders.pop(slot_id, None)
         if entry:
             result = await self._poly.cancel_order(entry.order_id)
@@ -412,6 +418,27 @@ class LiveTrader:
                 "\U0001f504 [%s] Rotation: cancelled entry %s -> %s",
                 slot_id, entry.order_id[:16], result,
             )
+            if result in ("matched", "gone"):
+                # Was filled before rotation — try to sell
+                log.warning(
+                    "\U0001f504 [%s] Entry was filled before rotation! Selling...",
+                    slot_id,
+                )
+                sell_px = max(entry.price, TICK_SIZE)
+                await self._poly.place_limit_sell(entry.token_id, sell_px, entry.size)
+
+        # Cancel filled position (rotation means market is ending)
+        filled = self._filled_positions.pop(slot_id, None)
+        if filled:
+            log.warning(
+                "\U0001f504 [%s] Rotation with filled position! Selling...",
+                slot_id,
+            )
+            sell_px = max(filled.price, TICK_SIZE)
+            await self._poly.place_limit_sell(filled.token_id, sell_px, filled.size)
+
+        # Reset engine for this slot
+        self._engines[slot_id] = StrategyEngine(self.strat_cfg)
 
     # ------------------------------------------------------------------
     # Shutdown
@@ -424,6 +451,13 @@ class LiveTrader:
             await self._poly.cancel_order(entry.order_id)
             log.info("Shutdown: cancelled entry for %s", slot_id)
         self._entry_orders.clear()
+
+        # Sell any filled positions
+        for slot_id, filled in list(self._filled_positions.items()):
+            log.warning("Shutdown: selling filled position for %s", slot_id)
+            sell_px = max(filled.price, TICK_SIZE)
+            await self._poly.place_limit_sell(filled.token_id, sell_px, filled.size)
+        self._filled_positions.clear()
 
         # Cancel any remaining on exchange
         await self._poly.cancel_all()
@@ -444,9 +478,13 @@ class LiveTrader:
 
     def print_summary(self) -> None:
         if self._session_trades == 0:
+            pending = len(self._entry_orders)
+            filled = len(self._filled_positions)
             log.info(
-                "\U0001f4ca LIVE: no trades yet | orders: %d placed, %d filled, %d cancelled",
+                "\U0001f4ca LIVE: no trades yet | orders: %d placed, %d filled, "
+                "%d cancelled | pending=%d filled_pos=%d",
                 self._orders_placed, self._orders_filled, self._orders_cancelled,
+                pending, filled,
             )
             return
         wr = self._session_wins / self._session_trades * 100
@@ -457,13 +495,17 @@ class LiveTrader:
             if cnt > 0:
                 slot_parts.append(f"{sid}={cnt}/${self._slot_pnl[sid]:+.2f}")
 
+        pending = len(self._entry_orders)
+        filled = len(self._filled_positions)
         log.info(
             "\U0001f4ca LIVE: %d trades, %.0f%% WR, $%+.2f | "
-            "orders: %d placed, %d filled (%.0f%%), %d cancelled | %s",
+            "orders: %d placed, %d filled (%.0f%%), %d cancelled | "
+            "pending=%d filled_pos=%d | %s",
             self._session_trades, wr, self._session_pnl,
             self._orders_placed, self._orders_filled,
             (self._orders_filled / self._orders_placed * 100) if self._orders_placed else 0,
             self._orders_cancelled,
+            pending, filled,
             "  ".join(slot_parts) if slot_parts else "no slot data",
         )
 
@@ -511,13 +553,14 @@ async def live_trader_worker(
     trader = LiveTrader(strat_cfg, slot_ids, poly)
 
     log.info(
-        "Live trader starting: %d BTC slots [%s]  bankroll=$%.0f  size=%d  "
-        "max_concurrent=%d  max_exposure=%.0f%%",
+        "Live trader starting: %d BTC slots [%s]  bankroll=$%.0f  size=%.0f  "
+        "max_concurrent=%d  max_exposure=%.0f%%  order_lifetime=%.0fs",
         len(slot_ids), ", ".join(slot_ids),
         strat_cfg.initial_bankroll,
         strat_cfg.base_size_contracts,
         strat_cfg.max_concurrent_positions,
         strat_cfg.max_exposure_frac * 100,
+        MIN_ORDER_LIFETIME_S,
     )
 
     from latpoly.workers.signal import SlotSignalState, build_normalized_tick
