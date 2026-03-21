@@ -470,7 +470,7 @@ class StrategyEngine:
         btc_to_pm_rate = self.cfg.btc_to_pm_base_rate * prob_sensitivity
         pm_move = bn_move_abs * btc_to_pm_rate
         target_profit = pm_move * self.cfg.exit_profit_fraction
-        target_profit = max(0.005, min(target_profit, 0.05))  # clamp
+        target_profit = max(0.01, min(target_profit, 0.05))  # clamp: min 1 tick ($0.01)
         return entry_price + target_profit
 
     @staticmethod

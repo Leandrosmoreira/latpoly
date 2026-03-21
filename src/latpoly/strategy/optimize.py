@@ -88,10 +88,11 @@ def create_objective(
 ):
     """Return an Optuna objective function with captured tick data.
 
-    Score = sharpe * trade_confidence - drawdown_penalty
-    - trade_confidence ramps from 0→1 as total_trades goes 0→20
-    - drawdown_penalty = 0.5 * |max_drawdown| / initial_cash
-    - Configs with <3 trades get score -10 (garbage)
+    Score = total_pnl * trade_confidence - dd_penalty
+    - trade_confidence ramps from 0→1 as total_trades goes 0→50
+    - dd_penalty = 2.0 * |max_drawdown|
+    - Configs with <5 trades get score -10 (garbage)
+    - Uses PnL directly (not Sharpe) to avoid rewarding zero-variance configs
     """
 
     def objective(trial: optuna.Trial) -> float:
@@ -107,12 +108,12 @@ def create_objective(
         trial.set_user_attr("sharpe", round(result.sharpe, 4))
         trial.set_user_attr("avg_pnl_per_trade", round(result.avg_pnl_per_trade, 6))
 
-        if result.total_trades < 3:
+        if result.total_trades < 5:
             return -10.0
 
-        trade_confidence = min(1.0, result.total_trades / 20.0)
-        dd_penalty = 0.5 * abs(result.max_drawdown) / initial_cash
-        score = result.sharpe * trade_confidence - dd_penalty
+        trade_confidence = min(1.0, result.total_trades / 50.0)
+        dd_penalty = 2.0 * abs(result.max_drawdown)
+        score = result.total_pnl * trade_confidence - dd_penalty
         return score
 
     return objective
