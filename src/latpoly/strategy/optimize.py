@@ -113,6 +113,7 @@ def run_optimize(
     storage_path: str | None = None,
     seed: int = 42,
     initial_cash: float = 1000.0,
+    n_jobs: int = 4,
     verbose: bool = True,
 ) -> optuna.Study:
     """Run Optuna optimization over the strategy parameter space.
@@ -163,7 +164,7 @@ def run_optimize(
     objective = create_objective(ticks, initial_cash=initial_cash)
 
     t0 = time.monotonic()
-    study.optimize(objective, n_trials=n_trials, n_jobs=1)
+    study.optimize(objective, n_trials=n_trials, n_jobs=n_jobs)
     elapsed = time.monotonic() - t0
 
     if verbose:
@@ -288,6 +289,7 @@ def main() -> None:
         print("  --study=NAME      Study name for resume (default: latpoly)")
         print("  --storage=PATH    JournalFile path for persistence (default: in-memory)")
         print("  --slot=SLOT_ID    Filter ticks by slot_id (e.g. --slot=btc-15m)")
+        print("  --jobs=N          Parallel threads (default: 4)")
         print("  --cash=N          Initial cash (default: 1000)")
         print("  --quiet           Suppress Optuna trial-by-trial logging")
         sys.exit(0)
@@ -299,6 +301,7 @@ def main() -> None:
     storage_path = None
     slot_filter = None
     initial_cash = 1000.0
+    n_jobs = 4
     quiet = "--quiet" in args
 
     for a in args:
@@ -314,6 +317,8 @@ def main() -> None:
             slot_filter = a.split("=", 1)[1]
         elif a.startswith("--cash="):
             initial_cash = float(a.split("=", 1)[1])
+        elif a.startswith("--jobs="):
+            n_jobs = int(a.split("=", 1)[1])
 
     file_args = [a for a in args if not a.startswith("--")]
 
@@ -342,7 +347,7 @@ def main() -> None:
         Path(storage_path).parent.mkdir(parents=True, exist_ok=True)
 
     # Run optimization
-    print(f"\n  Optuna TPE optimization: {n_trials} trials, seed={seed}")
+    print(f"\n  Optuna TPE optimization: {n_trials} trials, seed={seed}, jobs={n_jobs}")
     print(f"  Study: {study_name}  |  Storage: {storage_path or 'in-memory'}")
     print(f"  Search space: 15 parameters (continuous)")
     print()
@@ -354,6 +359,7 @@ def main() -> None:
         storage_path=storage_path,
         seed=seed,
         initial_cash=initial_cash,
+        n_jobs=n_jobs,
         verbose=not quiet,
     )
 
