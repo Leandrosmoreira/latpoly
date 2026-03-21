@@ -210,14 +210,11 @@ class LiveTrader:
                 "tick_idx": tick_idx,
             })
 
-            # Place real BUY order (async, non-blocking)
-            task = asyncio.create_task(
-                self._place_entry(
-                    slot_id, token_id, signal.side,
-                    entry_price, signal.size, tick_idx,
-                )
+            # Place real BUY order (await to ensure it's tracked before exit)
+            await self._place_entry(
+                slot_id, token_id, signal.side,
+                entry_price, signal.size, tick_idx,
             )
-            self._pending_tasks.append(task)
 
         # --- EXIT ---
         elif signal.action == "EXIT":
