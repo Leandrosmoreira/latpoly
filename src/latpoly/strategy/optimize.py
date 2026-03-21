@@ -113,7 +113,7 @@ def run_optimize(
     storage_path: str | None = None,
     seed: int = 42,
     initial_cash: float = 1000.0,
-    n_jobs: int = 4,
+    n_jobs: int = 2,
     verbose: bool = True,
 ) -> optuna.Study:
     """Run Optuna optimization over the strategy parameter space.
@@ -301,7 +301,7 @@ def main() -> None:
     storage_path = None
     slot_filter = None
     initial_cash = 1000.0
-    n_jobs = 4
+    n_jobs = 2
     quiet = "--quiet" in args
 
     for a in args:
