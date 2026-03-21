@@ -75,13 +75,17 @@ _TTX_BUCKETS = [
 
 
 def load_ticks(paths: list[str]) -> list[dict]:
-    """Load ticks from one or more JSONL files."""
+    """Load ticks from one or more JSONL files with progress feedback."""
     ticks = []
-    for p in paths:
+    total_files = len(paths)
+    for fi, p in enumerate(paths, 1):
         path = Path(p)
         if not path.exists():
             print(f"WARNING: {p} not found, skipping")
             continue
+        size_mb = path.stat().st_size / (1024 * 1024)
+        file_ticks = 0
+        print(f"  [{fi}/{total_files}] {path.name} ({size_mb:.1f} MB) ...", end="", flush=True)
         with open(path, "r") as f:
             for line in f:
                 line = line.strip()
@@ -89,8 +93,10 @@ def load_ticks(paths: list[str]) -> list[dict]:
                     continue
                 try:
                     ticks.append(json.loads(line))
+                    file_ticks += 1
                 except json.JSONDecodeError:
                     continue
+        print(f" {file_ticks:,} ticks", flush=True)
     return ticks
 
 
