@@ -37,26 +37,43 @@ def suggest_params(trial: optuna.Trial) -> dict:
 
     Parameter names match StrategyConfig fields exactly so they can be
     passed directly to ``_make_config_with_overrides()``.
+
+    25 tunable parameters — excludes fixed Polymarket rules
+    (fee structure, min_maker_size, entry_as_maker) and initial_bankroll.
     """
     return {
         # -- Entry thresholds --
         "zscore_entry_threshold": trial.suggest_float("zscore_entry_threshold", 1.0, 3.5),
         "btc_to_pm_base_rate": trial.suggest_float("btc_to_pm_base_rate", 0.0005, 0.005, log=True),
         "min_bn_move_abs": trial.suggest_float("min_bn_move_abs", 2.0, 12.0),
+        "min_ret_1s_confirm": trial.suggest_float("min_ret_1s_confirm", 0.0, 1.0),
         "min_mid_entry": trial.suggest_float("min_mid_entry", 0.05, 0.30),
         "max_mid_entry": trial.suggest_float("max_mid_entry", 0.30, 0.90),
         "max_spread_entry": trial.suggest_float("max_spread_entry", 0.03, 0.15),
         "min_depth_contracts": trial.suggest_float("min_depth_contracts", 30.0, 300.0),
         "min_net_edge": trial.suggest_float("min_net_edge", 0.001, 0.02, log=True),
+        # -- Risk filters --
+        "min_distance_to_strike": trial.suggest_float("min_distance_to_strike", 1.0, 20.0),
+        "max_data_age_ms": trial.suggest_float("max_data_age_ms", 500.0, 5000.0),
         # -- Timing --
         "cooldown_ticks": trial.suggest_int("cooldown_ticks", 2, 30),
         "entry_window_min_s": trial.suggest_float("entry_window_min_s", 10.0, 90.0),
         "entry_window_max_s": trial.suggest_float("entry_window_max_s", 200.0, 900.0),
+        # -- Position sizing --
+        "base_size_contracts": trial.suggest_int("base_size_contracts", 5, 50),
+        "max_concurrent_positions": trial.suggest_int("max_concurrent_positions", 1, 15),
+        "max_exposure_frac": trial.suggest_float("max_exposure_frac", 0.2, 0.8),
         # -- Exit strategy --
         "exit_profit_fraction": trial.suggest_float("exit_profit_fraction", 0.2, 0.9),
         "max_hold_ticks": trial.suggest_int("max_hold_ticks", 15, 120),
         "stop_loss_per_contract": trial.suggest_float("stop_loss_per_contract", 0.01, 0.08),
         "hold_to_expiry_distance": trial.suggest_float("hold_to_expiry_distance", 15.0, 150.0),
+        # -- Time weight (aggression near expiry) --
+        "time_weight_min": trial.suggest_float("time_weight_min", 0.5, 2.0),
+        "time_weight_max": trial.suggest_float("time_weight_max", 1.0, 5.0),
+        # -- Daily limits --
+        "max_daily_loss": trial.suggest_float("max_daily_loss", 10.0, 100.0),
+        "max_daily_trades": trial.suggest_int("max_daily_trades", 50, 5000),
     }
 
 
@@ -108,7 +125,7 @@ def create_objective(
 
 def run_optimize(
     ticks: list[dict],
-    n_trials: int = 200,
+    n_trials: int = 500,
     study_name: str = "latpoly",
     storage_path: str | None = None,
     seed: int = 42,
@@ -295,7 +312,7 @@ def main() -> None:
         sys.exit(0)
 
     # Parse options
-    n_trials = 200
+    n_trials = 500
     seed = 42
     study_name = "latpoly"
     storage_path = None
@@ -349,7 +366,7 @@ def main() -> None:
     # Run optimization
     print(f"\n  Optuna TPE optimization: {n_trials} trials, seed={seed}, jobs={n_jobs}")
     print(f"  Study: {study_name}  |  Storage: {storage_path or 'in-memory'}")
-    print(f"  Search space: 15 parameters (continuous)")
+    print(f"  Search space: 25 parameters (all tunable StrategyConfig fields)")
     print()
 
     study = run_optimize(
