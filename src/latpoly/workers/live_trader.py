@@ -4,14 +4,14 @@ Mirrors paper_trader_worker but places real orders via Polymarket CLOB API.
 Only operates on BTC slots (filters out ETH due to low liquidity).
 
 Order lifecycle:
-1. Engine BUY signal  -> place GTC limit BUY at entry_price (maker)
-2. Freeze slot for MIN_ORDER_LIFETIME_S (don't feed engine, let order fill)
+1. Engine BUY signal  -> place GTC limit BUY at best_bid + 1 tick (maker, queue priority)
+2. Freeze slot for MIN_ORDER_LIFETIME_S (~7s, don't feed engine, let order fill)
 3. After freeze, cancel order to check fill status:
-   - "canceled"        -> entry never filled, engine resets, done
-   - "matched"/"gone"  -> entry filled, resume engine, wait for EXIT signal
-4. Engine EXIT signal  -> place SELL at exit_price
-5. Market rotation     -> cancel all pending orders for slot
-6. Shutdown            -> cancel ALL orders globally
+   - "canceled"        -> entry never filled (~60-70%), engine resets, done
+   - "matched"/"gone"  -> entry filled (~30-40%), hold to expiry
+4. Filled positions are HELD to expiry — binary markets auto-settle at $0 or $1
+5. Market rotation     -> cancel pending entries, filled positions auto-settle
+6. Shutdown            -> cancel pending entries, filled positions auto-settle
 
 Logs trades to data/live/ in same JSONL format as paper_trader.
 """
@@ -42,7 +42,7 @@ TICK_SIZE = 0.01
 # Minimum seconds an entry order must live before we check fill status.
 # Without this, the engine exits on the very next tick (~0.2s) and the
 # maker order never has time to fill on the exchange.
-MIN_ORDER_LIFETIME_S = float(os.environ.get("LATPOLY_MIN_ORDER_LIFE", "15"))
+MIN_ORDER_LIFETIME_S = float(os.environ.get("LATPOLY_MIN_ORDER_LIFE", "7"))
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +242,13 @@ class LiveTrader:
                 log.warning("[%s] No token_id for %s — skipping entry", slot_id, signal.side)
                 return signal
 
-            entry_price = round(signal.entry_price, 2)
+            # Place 1 tick above best_bid for queue priority
+            pm = state.get_polymarket(slot_id)
+            if signal.side == "YES":
+                best_bid = pm.yes_best_bid or signal.entry_price
+            else:
+                best_bid = pm.no_best_bid or signal.entry_price
+            entry_price = round(best_bid + TICK_SIZE, 2)
 
             log.info(
                 "\U0001f534 [%s] LIVE ENTRY: %s %s sz=%d @ $%.2f -> target=$%.4f  [%s]",
@@ -307,29 +313,16 @@ class LiveTrader:
                     "session_win_rate": round(wr, 1),
                 })
 
-                # If we have a real filled position, place SELL
-                filled = self._filled_positions.pop(slot_id, None)
+                # Hold to expiry — binary markets auto-settle at $0 or $1
+                filled = self._filled_positions.get(slot_id)
                 if filled is not None:
-                    exit_price = self._compute_real_exit_price(last_trade)
                     log.info(
-                        "📤 [%s] Placing exit SELL @ $%.2f (entry was $%.2f)",
-                        slot_id, exit_price, filled.price,
+                        "🏁 [%s] Holding to expiry (no SELL): %s @ $%.2f sz=%d — "
+                        "market will auto-settle at $0 or $1",
+                        slot_id, filled.side, filled.price, filled.size,
                     )
-                    sell_oid = await self._poly.place_limit_sell(
-                        filled.token_id, exit_price, filled.size,
-                    )
-                    if sell_oid:
-                        log.info(
-                            "📤 [%s] Exit SELL placed: %s @ $%.2f",
-                            slot_id, sell_oid[:16], exit_price,
-                        )
-                    else:
-                        log.error(
-                            "📤 [%s] Exit SELL FAILED @ $%.2f — shares may be stuck!",
-                            slot_id, exit_price,
-                        )
+                    # Don't pop — keep tracking until rotation clears it
                 else:
-                    # No real position — engine-only trade (entry wasn't filled)
                     log.info(
                         "📥 [%s] Engine EXIT but no filled position (virtual only)",
                         slot_id,
@@ -409,7 +402,11 @@ class LiveTrader:
     # ------------------------------------------------------------------
 
     async def handle_rotation(self, slot_id: str) -> None:
-        """Cancel all pending orders for a slot on market rotation."""
+        """Cancel pending orders for a slot on market rotation.
+
+        Filled positions are NOT sold — binary markets auto-settle at
+        $0 or $1 on expiry.  We just log and clear tracking.
+        """
         # Cancel pending entry
         entry = self._entry_orders.pop(slot_id, None)
         if entry:
@@ -419,23 +416,20 @@ class LiveTrader:
                 slot_id, entry.order_id[:16], result,
             )
             if result in ("matched", "gone"):
-                # Was filled before rotation — try to sell
-                log.warning(
-                    "\U0001f504 [%s] Entry was filled before rotation! Selling...",
+                log.info(
+                    "\U0001f504 [%s] Entry was filled before rotation — "
+                    "will auto-settle at expiry",
                     slot_id,
                 )
-                sell_px = max(entry.price, TICK_SIZE)
-                await self._poly.place_limit_sell(entry.token_id, sell_px, entry.size)
 
-        # Cancel filled position (rotation means market is ending)
+        # Filled positions auto-settle — just clear tracking
         filled = self._filled_positions.pop(slot_id, None)
         if filled:
-            log.warning(
-                "\U0001f504 [%s] Rotation with filled position! Selling...",
-                slot_id,
+            log.info(
+                "\U0001f504 [%s] Rotation with filled position (%s @ $%.2f) — "
+                "will auto-settle at expiry",
+                slot_id, filled.side, filled.price,
             )
-            sell_px = max(filled.price, TICK_SIZE)
-            await self._poly.place_limit_sell(filled.token_id, sell_px, filled.size)
 
         # Reset engine for this slot
         self._engines[slot_id] = StrategyEngine(self.strat_cfg)
@@ -445,21 +439,25 @@ class LiveTrader:
     # ------------------------------------------------------------------
 
     async def cancel_all_orders(self) -> None:
-        """Cancel all pending orders (clean shutdown)."""
+        """Cancel pending entry orders (clean shutdown).
+
+        Filled positions are NOT sold — binary markets auto-settle.
+        """
         # Cancel tracked entries
         for slot_id, entry in list(self._entry_orders.items()):
             await self._poly.cancel_order(entry.order_id)
             log.info("Shutdown: cancelled entry for %s", slot_id)
         self._entry_orders.clear()
 
-        # Sell any filled positions
+        # Filled positions auto-settle — just log
         for slot_id, filled in list(self._filled_positions.items()):
-            log.warning("Shutdown: selling filled position for %s", slot_id)
-            sell_px = max(filled.price, TICK_SIZE)
-            await self._poly.place_limit_sell(filled.token_id, sell_px, filled.size)
+            log.info(
+                "Shutdown: filled position for %s (%s @ $%.2f) will auto-settle",
+                slot_id, filled.side, filled.price,
+            )
         self._filled_positions.clear()
 
-        # Cancel any remaining on exchange
+        # Cancel any remaining unfilled orders on exchange
         await self._poly.cancel_all()
 
     # ------------------------------------------------------------------
