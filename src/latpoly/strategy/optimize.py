@@ -38,7 +38,7 @@ def suggest_params(trial: optuna.Trial) -> dict:
     Parameter names match StrategyConfig fields exactly so they can be
     passed directly to ``_make_config_with_overrides()``.
 
-    25 tunable parameters — excludes fixed Polymarket rules
+    24 tunable parameters — excludes fixed Polymarket rules
     (fee structure, min_maker_size, entry_as_maker) and initial_bankroll.
     """
     return {
@@ -60,7 +60,7 @@ def suggest_params(trial: optuna.Trial) -> dict:
         "entry_window_min_s": trial.suggest_float("entry_window_min_s", 10.0, 90.0),
         "entry_window_max_s": trial.suggest_float("entry_window_max_s", 200.0, 900.0),
         # -- Position sizing --
-        "base_size_contracts": trial.suggest_int("base_size_contracts", 5, 50),
+        "base_size_contracts": 5,  # fixed: min Polymarket maker size
         "max_concurrent_positions": trial.suggest_int("max_concurrent_positions", 1, 15),
         "max_exposure_frac": trial.suggest_float("max_exposure_frac", 0.2, 0.8),
         # -- Exit strategy --
@@ -130,7 +130,7 @@ def run_optimize(
     study_name: str = "latpoly",
     storage_path: str | None = None,
     seed: int = 42,
-    initial_cash: float = 1000.0,
+    initial_cash: float = 100.0,
     n_jobs: int = 2,
     verbose: bool = True,
 ) -> optuna.Study:
@@ -308,7 +308,7 @@ def main() -> None:
         print("  --storage=PATH    JournalFile path for persistence (default: in-memory)")
         print("  --slot=SLOT_ID    Filter ticks by slot_id (e.g. --slot=btc-15m)")
         print("  --jobs=N          Parallel threads (default: 4)")
-        print("  --cash=N          Initial cash (default: 1000)")
+        print("  --cash=N          Initial cash (default: 100)")
         print("  --quiet           Suppress Optuna trial-by-trial logging")
         sys.exit(0)
 
@@ -318,7 +318,7 @@ def main() -> None:
     study_name = "latpoly"
     storage_path = None
     slot_filter = None
-    initial_cash = 1000.0
+    initial_cash = 100.0
     n_jobs = 2
     quiet = "--quiet" in args
 
@@ -367,7 +367,7 @@ def main() -> None:
     # Run optimization
     print(f"\n  Optuna TPE optimization: {n_trials} trials, seed={seed}, jobs={n_jobs}")
     print(f"  Study: {study_name}  |  Storage: {storage_path or 'in-memory'}")
-    print(f"  Search space: 25 parameters (all tunable StrategyConfig fields)")
+    print(f"  Search space: 24 parameters (all tunable StrategyConfig fields)")
     print()
 
     study = run_optimize(
