@@ -964,8 +964,10 @@ async def live_trader_worker(
 
     strat_cfg = StrategyConfig()
 
-    # Filter to BTC slots only
-    btc_slots = [s for s in cfg.market_slots if s.slot_id.startswith("btc-")]
+    # Filter to allowed live trading slots (env: LATPOLY_LIVE_SLOTS, default: btc-15m)
+    allowed_raw = os.environ.get("LATPOLY_LIVE_SLOTS", "btc-15m")
+    allowed_ids = {s.strip() for s in allowed_raw.split(",") if s.strip()}
+    btc_slots = [s for s in cfg.market_slots if s.slot_id in allowed_ids]
     slot_ids = [s.slot_id for s in btc_slots]
 
     if not slot_ids:
