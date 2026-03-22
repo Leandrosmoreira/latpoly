@@ -4,17 +4,21 @@ Mirrors paper_trader_worker but places real orders via Polymarket CLOB API.
 Only operates on BTC slots (filters out ETH due to low liquidity).
 
 Order lifecycle:
-1. Engine BUY signal  -> place GTC limit BUY at best_bid + 1 tick (maker, queue priority)
+1. Engine BUY signal  -> place GTC limit BUY at best_bid (maker, 0% fee)
+   - BUY size: min 5 shares (maker minimum). With residual, rounds up to next
+     multiple of 5 (e.g. residual=2 -> buy 8 -> total 10 = 2 SELL lots)
 2. Freeze slot for MIN_ORDER_LIFETIME_S (~7s, don't feed engine, let order fill)
 3. After freeze, cancel order to check fill status:
    - "canceled"        -> entry never filled (~60-70%), engine resets, done
-   - "matched"/"gone"  -> entry filled (~30-40%), place SELL at entry + N ticks
-4. SELL order placed at entry_price + fixed_exit_ticks * $0.01 (maker, 0% fee)
-5. Each tick: check if SELL filled (via cancel-to-check after MIN_ORDER_LIFETIME_S)
+   - "matched"/"gone"  -> entry filled (~30-40%), place SELL
+   - partial fill      -> if total >= 5 -> place SELL; else accumulate residual
+4. SELL order placed at max(entry, ceil(mid + 2*$0.01)) (maker, 0% fee)
+5. SELL repaint loop: every 7s, cancel-to-check, recalculate price, re-place
    - SELL filled -> profit taken, position cleared, engine resets for next trade
-   - SELL not filled + >7s before expiry -> re-place SELL, keep trying
-   - SELL not filled + <7s before expiry -> cancel SELL, hold to expiry
-6. Market rotation -> cancel all orders, filled positions auto-settle
+   - SELL partial -> save residual (<5 = wait for next BUY; >=5 = repaint SELL)
+   - SELL not filled + >7s before expiry -> repaint SELL at current mid + 2 ticks
+   - SELL not filled + <7s before expiry -> cancel SELL, hold to auto-settlement
+6. Market rotation -> cancel all orders, filled positions auto-settle at $0/$1
 7. Shutdown -> cancel all orders, filled positions auto-settle
 
 Logs trades to data/live/ in same JSONL format as paper_trader.
@@ -185,14 +189,18 @@ class LiveTrader:
     def _compute_buy_size(self, slot_id: str) -> int:
         """Compute next BUY size, accounting for residual shares.
 
-        Goal: total shares (residual + new) must be >= min_maker_size (5).
-        Always buys in multiples that result in a sellable lot.
+        Constraints:
+        - BUY order itself must be >= min_maker_size (5) for maker pricing
+        - Total (residual + buy) should be a multiple of min_maker_size for clean SELL lots
 
         Examples (min_maker_size=5, base_size=5):
-          residual=0 -> buy 5  (total=5)
-          residual=2 -> buy 3  (total=5, sellable as maker)
-          residual=4 -> buy 1  (total=5, sellable as maker)
-          residual=5 -> buy 5  (total=10, sell 10 or 5+5)
+          residual=0 -> buy 5   (total=5,  1 SELL lot)
+          residual=1 -> buy 9   (total=10, 2 SELL lots)
+          residual=2 -> buy 8   (total=10, 2 SELL lots)
+          residual=3 -> buy 7   (total=10, 2 SELL lots)
+          residual=4 -> buy 6   (total=10, 2 SELL lots)
+          residual=5 -> buy 5   (total=10, 2 SELL lots)
+          residual=7 -> buy 8   (total=15, 3 SELL lots)
         """
         min_lot = self.strat_cfg.min_maker_size  # 5
         base = self.strat_cfg.base_size_contracts  # 5
@@ -201,12 +209,13 @@ class LiveTrader:
         if residual <= 0:
             return base  # no residual, buy normal lot
 
-        # Buy enough to complete next full lot
-        need = min_lot - (residual % min_lot)
-        if need == min_lot:
-            # residual is already a multiple of min_lot, buy a full base
-            return base
-        return need
+        # Need total to be next multiple of min_lot above (residual + min_lot)
+        # so that both BUY >= min_lot AND total is a clean multiple
+        target_total = ((residual + min_lot) // min_lot) * min_lot
+        # If that target doesn't give us a buy >= min_lot, go up one more multiple
+        if target_total - residual < min_lot:
+            target_total += min_lot
+        return target_total - residual
 
     def _compute_sell_size(self, slot_id: str, filled_size: int) -> int:
         """Compute SELL size: residual + newly filled shares.
