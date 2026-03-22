@@ -19,6 +19,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import math
 import sys
 import time
 from collections import defaultdict, deque
@@ -47,6 +48,10 @@ _BN_MOVE_MODERATE = 10.0
 _BN_MOVE_WEAK = 3.0
 _EDGE_REMAINING_GOOD = 5.0
 _SPREAD_TIGHTEN_THRESHOLD = -0.005
+
+# EMA Z-score parameters (must match signal.py)
+_EMA_ALPHA = 0.05
+_ZSCORE_WARMUP = 20
 
 # Execution risk weights
 _W_EDGE_DECAY = 0.30
@@ -82,6 +87,82 @@ def _percentile(sorted_vals: list[float], p: float) -> float:
     if c >= len(sorted_vals):
         return sorted_vals[-1]
     return sorted_vals[f] + (k - f) * (sorted_vals[c] - sorted_vals[f])
+
+
+# ---------------------------------------------------------------------------
+# EMA Z-Score (offline replay — same logic as signal.py EmaZScore)
+# ---------------------------------------------------------------------------
+
+
+class _OfflineEmaZScore:
+    """Replicates the live EmaZScore for offline enrichment.
+
+    Resets on market rotation (condition_id change).
+    """
+
+    __slots__ = ("_mean", "_var", "_count", "_alpha", "_last_cid")
+
+    def __init__(self, alpha: float = _EMA_ALPHA) -> None:
+        self._alpha = alpha
+        self._mean = 0.0
+        self._var = 0.0
+        self._count = 0
+        self._last_cid: Optional[str] = None
+
+    def update(self, x: Optional[float], condition_id: Optional[str] = None) -> Optional[float]:
+        """Feed value, return zscore. Resets on new condition_id."""
+        if x is None:
+            return None
+
+        # Reset on market rotation
+        if condition_id is not None and condition_id != self._last_cid:
+            self._mean = 0.0
+            self._var = 0.0
+            self._count = 0
+            self._last_cid = condition_id
+
+        self._count += 1
+
+        if self._count == 1:
+            self._mean = x
+            self._var = 0.0
+            return None
+
+        a = self._alpha
+        delta = x - self._mean
+        self._mean = a * x + (1.0 - a) * self._mean
+        self._var = a * (delta * delta) + (1.0 - a) * self._var
+
+        if self._count < _ZSCORE_WARMUP:
+            return None
+
+        std = math.sqrt(self._var) if self._var > 0 else 0.0
+        if std < 1e-10:
+            return 0.0
+        return round(delta / std, 4)
+
+
+def _compute_edge_score(
+    bn_move: Optional[float],
+    zscore: Optional[float],
+    time_to_expiry_ms: Optional[float],
+) -> Optional[float]:
+    """Simplified edge_score for enrichment (matches signal.py logic)."""
+    if bn_move is None:
+        return None
+    edge = abs(bn_move)
+
+    if zscore is not None:
+        edge *= (1.0 + abs(zscore) * 0.5)
+
+    # Time urgency
+    if time_to_expiry_ms is not None:
+        tte_s = time_to_expiry_ms / 1000.0
+        if 30.0 <= tte_s <= 900.0:
+            urgency = 1.0 + (900.0 - tte_s) / 900.0  # 1.0 → 2.0
+            edge *= urgency
+
+    return round(edge, 4)
 
 
 # ---------------------------------------------------------------------------
@@ -397,6 +478,7 @@ def enrich_file(
     """Stream-enrich a raw JSONL file into an enriched JSONL file.
 
     Uses a sliding window deque for constant memory usage.
+    Recomputes zscore_bn_move and edge_score when missing from raw data.
     """
     if summary is None:
         summary = EnrichSummary()
@@ -404,6 +486,10 @@ def enrich_file(
     profile = LATENCY_PROFILES[profile_name]
     window: deque = deque(maxlen=WINDOW_SIZE)
     slot_check = f'"slot_id":"{slot_filter}"' if slot_filter else None
+
+    # Offline zscore recomputers (one per indicator)
+    zscore_bn = _OfflineEmaZScore()
+    zscore_ret1s = _OfflineEmaZScore()
 
     size_mb = input_path.stat().st_size / (1024 * 1024)
     print(f"  Processing {input_path.name} ({size_mb:.1f} MB) ...", end="", flush=True)
@@ -432,6 +518,29 @@ def enrich_file(
             if slot_filter and tick.get("slot_id", slot_filter) != slot_filter:
                 summary.skipped_slot += 1
                 continue
+
+            # --- Recompute zscore if missing ---
+            cid = tick.get("condition_id")
+            bn_move = _ef(tick, "bn_move_since_poly")
+            ret_1s = _ef(tick, "ret_1s")
+
+            if tick.get("zscore_bn_move") is None and bn_move is not None:
+                tick["zscore_bn_move"] = zscore_bn.update(bn_move, cid)
+            else:
+                # Keep the zscore tracker in sync even when field exists
+                zscore_bn.update(bn_move, cid)
+
+            if tick.get("zscore_ret1s") is None and ret_1s is not None:
+                tick["zscore_ret1s"] = zscore_ret1s.update(ret_1s, cid)
+            else:
+                zscore_ret1s.update(ret_1s, cid)
+
+            # Recompute edge_score if missing
+            if tick.get("edge_score") is None:
+                tick["edge_score"] = _compute_edge_score(
+                    bn_move, tick.get("zscore_bn_move"),
+                    _ef(tick, "time_to_expiry_ms"),
+                )
 
             summary.total_ticks += 1
             window.append(tick)
