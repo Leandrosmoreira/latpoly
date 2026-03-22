@@ -68,7 +68,7 @@ class StrategyConfig:
         default_factory=lambda: _env_int("LATPOLY_STRAT_MAX_CONCURRENT", 10)
     )
     max_exposure_frac: float = field(
-        default_factory=lambda: _env_float("LATPOLY_STRAT_MAX_EXPOSURE", 0.50)  # 50% of bankroll
+        default_factory=lambda: _env_float("LATPOLY_STRAT_MAX_EXPOSURE", 0.30)  # 30% of bankroll
     )
     # Minimum shares for maker exit on Polymarket
     min_maker_size: int = field(
@@ -144,8 +144,9 @@ class StrategyConfig:
         default_factory=lambda: _env_float("LATPOLY_STRAT_HOLD_EXPIRY_DIST", 50.0)
     )
     # Fixed exit target in ticks (0 = use dynamic target, >0 = entry + N × $0.01)
+    # Default +2 ticks ($0.02 profit/share) — optimal from target sweep analysis
     fixed_exit_ticks: int = field(
-        default_factory=lambda: _env_int("LATPOLY_STRAT_FIXED_EXIT_TICKS", 0)
+        default_factory=lambda: _env_int("LATPOLY_STRAT_FIXED_EXIT_TICKS", 2)
     )
 
     # --- Time weight (aggression near expiry) ---

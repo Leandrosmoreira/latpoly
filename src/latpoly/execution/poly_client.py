@@ -310,6 +310,40 @@ class PolyClient:
             log.error("Cancel %s failed: %s", order_id[:16], e)
             return "failed"
 
+    async def get_order(self, order_id: str) -> Optional[dict]:
+        """Fetch order details from the exchange.
+
+        Returns raw order dict with fields like:
+          size_matched, original_size, price, side, status, ...
+        Returns None on failure.
+        """
+        if not self._client:
+            return None
+        try:
+            resp = await asyncio.to_thread(self._client.get_order, order_id)
+            if isinstance(resp, dict):
+                return resp
+            return None
+        except Exception as e:
+            log.debug("get_order %s failed: %s", order_id[:16], e)
+            return None
+
+    async def get_filled_size(self, order_id: str) -> int:
+        """Get how many shares were filled for an order.
+
+        Returns 0 if order not found or no fills.
+        Checks 'size_matched' field from Polymarket API.
+        """
+        order = await self.get_order(order_id)
+        if order is None:
+            return 0
+        # Polymarket API returns size_matched as string or number
+        matched = order.get("size_matched") or order.get("matched_size") or 0
+        try:
+            return int(float(str(matched)))
+        except (ValueError, TypeError):
+            return 0
+
     async def cancel_all(self) -> bool:
         """Cancel all open orders on the exchange."""
         if not self._client:
