@@ -143,6 +143,10 @@ class StrategyConfig:
     hold_to_expiry_distance: float = field(
         default_factory=lambda: _env_float("LATPOLY_STRAT_HOLD_EXPIRY_DIST", 50.0)
     )
+    # Fixed exit target in ticks (0 = use dynamic target, >0 = entry + N × $0.01)
+    fixed_exit_ticks: int = field(
+        default_factory=lambda: _env_int("LATPOLY_STRAT_FIXED_EXIT_TICKS", 0)
+    )
 
     # --- Time weight (aggression near expiry) ---
     time_weight_min: float = field(

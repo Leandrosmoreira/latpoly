@@ -552,6 +552,7 @@ def main() -> None:
     do_sweep = "--sweep" in args
     do_diag = "--diag" in args
     do_optimize = "--optimize" in args
+    do_target_sweep = "--target-sweep" in args
 
     # Parse --n-trials for optimize mode
     n_trials = 200
@@ -584,11 +585,42 @@ def main() -> None:
         print("No ticks loaded. Check file paths.")
         sys.exit(1)
 
-    if do_optimize:
-        from latpoly.strategy.optimize import run_optimize, print_optimize_report
-        study = run_optimize(ticks, n_trials=n_trials)
-        print_optimize_report(study)
-    elif do_sweep:
+    if do_target_sweep:
+        # Test fixed exit targets: +1, +2, +3, +5 ticks plus dynamic (0)
+        targets = [0, 1, 2, 3, 5]
+        print(f"\n{'='*70}")
+        print(f"  EXIT TARGET SWEEP — Fixed ticks vs Dynamic")
+        print(f"{'='*70}\n")
+        print(f"  {'Target':<12s} {'Trades':>7s} {'WR':>6s} {'PnL':>10s} {'AvgPnL':>9s} {'Sharpe':>8s} {'DD':>8s} {'AvgHold':>8s}")
+        print(f"  {'-'*12} {'-'*7} {'-'*6} {'-'*10} {'-'*9} {'-'*8} {'-'*8} {'-'*8}")
+        for t in targets:
+            label = "dynamic" if t == 0 else f"+{t} tick{'s' if t > 1 else ''}"
+            cfg = _make_config_with_overrides({"fixed_exit_ticks": t})
+            r = run_backtest(ticks, cfg=cfg, initial_cash=100.0)
+            avg_hold = sum(tr.hold_ticks for tr in r.trades) / max(len(r.trades), 1)
+            print(f"  {label:<12s} {r.total_trades:>7d} {r.win_rate*100:>5.1f}% ${r.total_pnl:>+9.2f} ${r.avg_pnl_per_trade:>+8.4f} {r.sharpe:>+8.2f} ${r.max_drawdown:>7.2f} {avg_hold:>7.1f}t")
+
+        # Also show full report for each
+        print(f"\n{'='*70}")
+        for t in targets:
+            label = "DYNAMIC" if t == 0 else f"FIXED +{t} TICK{'S' if t > 1 else ''}"
+            print(f"\n  --- {label} ---")
+            cfg = _make_config_with_overrides({"fixed_exit_ticks": t})
+            r = run_backtest(ticks, cfg=cfg, initial_cash=100.0)
+            # Compact report: by exit type only
+            by_exit = defaultdict(list)
+            for tr in r.trades:
+                by_exit[tr.exit_type].append(tr)
+            for et in ["MAKER", "STOP_LOSS", "TIMEOUT", "EXPIRY_WIN", "EXPIRY_LOSS"]:
+                trades = by_exit.get(et, [])
+                if not trades:
+                    continue
+                avg_pnl = sum(tr.pnl_net for tr in trades) / len(trades)
+                win_n = sum(1 for tr in trades if tr.pnl_net > 0)
+                print(f"    {et:15s}  {len(trades):4d} trades  avg=${avg_pnl:+.4f}  win={win_n}/{len(trades)}")
+        print(f"\n{'='*70}\n")
+
+    elif do_optimize:
         results = run_sweep(ticks)
         print_sweep_report(results)
     else:

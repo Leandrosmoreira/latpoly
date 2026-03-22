@@ -466,6 +466,10 @@ class StrategyEngine:
         Near mid=0.50 probability is most sensitive to BTC moves.
         Near extremes (0.10, 0.90) targets are smaller.
         """
+        # Fixed exit target: entry + N ticks (overrides dynamic calc)
+        if self.cfg.fixed_exit_ticks > 0:
+            return entry_price + self.cfg.fixed_exit_ticks * 0.01
+
         prob_sensitivity = 4.0 * mid * (1.0 - mid) if mid is not None else 0.5
         btc_to_pm_rate = self.cfg.btc_to_pm_base_rate * prob_sensitivity
         pm_move = bn_move_abs * btc_to_pm_rate
