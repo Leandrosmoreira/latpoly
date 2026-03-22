@@ -12,14 +12,12 @@ Order lifecycle:
    - "canceled"        -> entry never filled (~60-70%), engine resets, done
    - "matched"/"gone"  -> entry filled (~30-40%), place SELL
    - partial fill      -> if total >= 5 -> place SELL; else accumulate residual
-4. SELL order placed at max(floor, ceil(mid + 2*$0.01)) (maker, 0% fee)
-5. SELL repaint loop: every 7s, cancel-to-check, recalculate price, re-place
+4. SELL order placed at entry + exit_ticks × $0.01 (maker, 0% fee)
+5. SELL hangs in book — checked via GET (no cancel/re-place):
    - SELL filled -> profit taken, position cleared, engine resets for next trade
-   - SELL partial -> save residual (<5 = wait for next BUY; >=5 = repaint SELL)
-   - SELL not filled + >7s before expiry -> repaint SELL at current mid + 2 ticks
-   - SELL not filled + <7s before expiry -> cancel SELL, hold to auto-settlement
-   - SELL floor decay: after 10 checks, floor drops 1 tick per 5 checks
-     (entry+2 -> entry+1 -> entry) to avoid being stuck for minutes
+   - SELL partial fill detected -> log progress, keep waiting
+   - SELL not filled -> leave order in book, check again in 7s
+   - Near expiry (<7s) -> cancel SELL, hold to auto-settlement
 6. Market rotation -> cancel all orders, filled positions auto-settle at $0/$1
 7. Shutdown -> cancel all orders, filled positions auto-settle
 
@@ -637,16 +635,17 @@ class LiveTrader:
         return max(floor_price, min(0.99, sell_price))
 
     async def _check_exit_order(self, slot_id: str, tick: dict) -> str:
-        """Check if a pending SELL order has been filled.
+        """Check if a pending SELL order has been filled (non-destructive).
 
-        On each check cycle:
-        1. If near expiry -> cancel SELL, hold to auto-settle
-        2. If SELL was filled -> record profit, clear position, reset engine
-        3. If SELL not filled -> REPAINT at best available price (dynamic target)
+        Uses GET to check order status — does NOT cancel.
+        The SELL order stays in the book the entire time.
+
+        Only cancels the SELL order when:
+        - Near expiry (< 7s) -> hold to auto-settle
 
         Returns:
             "filled"    -- SELL was filled, profit taken
-            "holding"   -- SELL still pending, keep waiting
+            "holding"   -- SELL still pending in book, keep waiting
             "expired"   -- Near expiry, cancelled SELL, holding to settle
             "cancelled" -- SELL cancelled for other reason
         """
@@ -676,130 +675,134 @@ class LiveTrader:
         if age < MIN_ORDER_LIFETIME_S:
             return "holding"
 
-        # Cancel-to-check fill status
-        result = await self._poly.cancel_order(exit_order.order_id)
+        # --- Non-destructive check: GET order status ---
         exit_order.check_count += 1
+        order_data = await self._poly.get_order(exit_order.order_id)
 
-        if result in ("matched", "gone", "failed"):
-            # SELL was FILLED (fully or partially)
-            # Check actual sold quantity
-            sold_size = await self._poly.get_filled_size(exit_order.order_id)
-            if sold_size <= 0:
-                # API didn't return -- assume full fill
-                sold_size = exit_order.size
-
-            self._sells_filled += 1
-            pnl = (exit_order.sell_price - exit_order.entry_price) * sold_size
-            # Maker exit = 0% fee, so pnl is clean
-
-            # Check for partial fill residual
-            remaining = exit_order.size - sold_size
-            if remaining > 0:
-                # Partial SELL -- save residual for next cycle
-                self._residual[slot_id] = {
-                    "side": exit_order.side,
-                    "token_id": exit_order.token_id,
-                    "shares": remaining,
-                    "avg_entry": exit_order.entry_price,
-                }
-                log.info(
-                    ">>> [%s] SELL partial: sold %d of %d, residual=%d shares",
-                    slot_id, sold_size, exit_order.size, remaining,
-                )
-            else:
-                # Full fill -- clear residual
-                self._residual.pop(slot_id, None)
-
-            self._session_trades += 1
-            self._session_pnl += pnl
-            self._slot_trades[slot_id] = self._slot_trades.get(slot_id, 0) + 1
-            self._slot_pnl[slot_id] = self._slot_pnl.get(slot_id, 0.0) + pnl
-            if pnl > 0:
-                self._session_wins += 1
-
-            wr = (
-                self._session_wins / self._session_trades * 100
-                if self._session_trades
-                else 0
+        if order_data is None:
+            # Can't reach API -- keep waiting, order is still in book
+            log.debug(
+                "... [%s] SELL check #%d -- API unreachable, order still in book",
+                slot_id, exit_order.check_count,
             )
+            exit_order.created_at = time.time()  # reset timer for next check
+            return "holding"
 
-            now_iso = time.strftime("%H:%M:%S", time.gmtime())
+        # Parse fill status from order data
+        size_matched_raw = (
+            order_data.get("size_matched")
+            or order_data.get("matched_size")
+            or 0
+        )
+        try:
+            size_matched = int(float(str(size_matched_raw)))
+        except (ValueError, TypeError):
+            size_matched = 0
+
+        order_status = str(order_data.get("status", "")).lower()
+
+        if size_matched >= exit_order.size or order_status == "matched":
+            # FULL FILL
+            sold_size = max(size_matched, exit_order.size)
+            return self._record_sell_fill(slot_id, exit_order, sold_size)
+
+        elif size_matched > 0:
+            # PARTIAL FILL -- some shares sold, rest still in book
+            # Log progress but keep waiting for full fill
             log.info(
-                "+++ [%s] SELL FILLED! %s sold=%d entry=$%.2f sell=$%.2f pnl=$%+.4f  "
-                "residual=%d  [session: %d trades, %.0f%% WR, $%+.2f]",
-                slot_id, exit_order.side, sold_size,
-                exit_order.entry_price, exit_order.sell_price, pnl,
-                remaining,
-                self._session_trades, wr, self._session_pnl,
+                "... [%s] SELL partial progress: %d of %d filled (check #%d, %.0fs) "
+                "-- order still in book",
+                slot_id, size_matched, exit_order.size,
+                exit_order.check_count, age,
             )
-
-            self._write_trade({
-                "ts": now_iso,
-                "slot_id": slot_id,
-                "side": exit_order.side,
-                "entry_price": exit_order.entry_price,
-                "exit_price": exit_order.sell_price,
-                "size": sold_size,
-                "size_ordered": exit_order.size,
-                "residual": remaining,
-                "pnl_net": round(pnl, 4),
-                "exit_type": "SCALP_MAKER" if remaining == 0 else "SCALP_PARTIAL",
-                "hold_ticks": exit_order.check_count,
-                "session_pnl": round(self._session_pnl, 4),
-                "session_trades": self._session_trades,
-                "session_win_rate": round(wr, 1),
-            })
-
-            # Clear position and exit order
-            self._exit_orders.pop(slot_id, None)
-            self._filled_positions.pop(slot_id, None)
-
-            # Reset engine -- ready for next trade on this slot
-            self._engines[slot_id] = StrategyEngine(self.strat_cfg)
-
-            return "filled"
+            exit_order.created_at = time.time()  # reset timer for next check
+            return "holding"
 
         else:
-            # SELL not filled -- REPAINT at best current price
-            # Dynamic: MAX(decaying_floor, mid + 2 ticks)
-            new_sell_price = self._compute_sell_price(exit_order, tick)
-            old_price = exit_order.sell_price
-
-            # Show decay status in log
-            decay_after = self.strat_cfg.sell_decay_after_checks
-            decay_tag = ""
-            if exit_order.check_count > decay_after:
-                decay_every = self.strat_cfg.sell_decay_every_checks
-                ticks_lost = (exit_order.check_count - decay_after) // decay_every + 1
-                floor_ticks = max(0, self.strat_cfg.fixed_exit_ticks - ticks_lost)
-                decay_tag = f" DECAY:{floor_ticks}t"
-
-            log.info(
-                "... [%s] SELL not filled (check #%d, %.1fs) -- repainting "
-                "%s $%.2f -> $%.2f (entry=$%.2f%s)",
-                slot_id, exit_order.check_count, age,
-                exit_order.side, old_price, new_sell_price,
-                exit_order.entry_price, decay_tag,
-            )
-
-            # Re-place the SELL order at the new (possibly better) price
-            oid = await self._poly.place_limit_sell(
-                exit_order.token_id, new_sell_price, exit_order.size,
-            )
-            if oid:
-                exit_order.order_id = oid
-                exit_order.sell_price = new_sell_price
-                exit_order.created_at = time.time()
-                self._sells_placed += 1
-            else:
-                log.warning(
-                    "!!! [%s] SELL re-place FAILED -- holding to expiry",
-                    slot_id,
+            # NOT FILLED YET -- order still hanging in book, keep waiting
+            if exit_order.check_count % 10 == 0:
+                # Log every 10th check (~70s) to avoid spam
+                log.info(
+                    "... [%s] SELL pending (check #%d, %.0fs) -- %s @ $%.2f "
+                    "hanging in book (entry=$%.2f)",
+                    slot_id, exit_order.check_count, age,
+                    exit_order.side, exit_order.sell_price,
+                    exit_order.entry_price,
                 )
-                self._exit_orders.pop(slot_id, None)
-                return "cancelled"
-
+            exit_order.created_at = time.time()  # reset timer for next check
             return "holding"
+
+    def _record_sell_fill(
+        self, slot_id: str, exit_order: TrackedExit, sold_size: int,
+    ) -> str:
+        """Record a SELL fill — update stats, log, write trade, reset engine."""
+        self._sells_filled += 1
+        pnl = (exit_order.sell_price - exit_order.entry_price) * sold_size
+
+        # Check for partial fill residual
+        remaining = exit_order.size - sold_size
+        if remaining > 0:
+            self._residual[slot_id] = {
+                "side": exit_order.side,
+                "token_id": exit_order.token_id,
+                "shares": remaining,
+                "avg_entry": exit_order.entry_price,
+            }
+            log.info(
+                ">>> [%s] SELL partial: sold %d of %d, residual=%d shares",
+                slot_id, sold_size, exit_order.size, remaining,
+            )
+        else:
+            self._residual.pop(slot_id, None)
+
+        self._session_trades += 1
+        self._session_pnl += pnl
+        self._slot_trades[slot_id] = self._slot_trades.get(slot_id, 0) + 1
+        self._slot_pnl[slot_id] = self._slot_pnl.get(slot_id, 0.0) + pnl
+        if pnl > 0:
+            self._session_wins += 1
+
+        wr = (
+            self._session_wins / self._session_trades * 100
+            if self._session_trades
+            else 0
+        )
+
+        now_iso = time.strftime("%H:%M:%S", time.gmtime())
+        log.info(
+            "+++ [%s] SELL FILLED! %s sold=%d entry=$%.2f sell=$%.2f pnl=$%+.4f  "
+            "residual=%d  [session: %d trades, %.0f%% WR, $%+.2f]",
+            slot_id, exit_order.side, sold_size,
+            exit_order.entry_price, exit_order.sell_price, pnl,
+            remaining,
+            self._session_trades, wr, self._session_pnl,
+        )
+
+        self._write_trade({
+            "ts": now_iso,
+            "slot_id": slot_id,
+            "side": exit_order.side,
+            "entry_price": exit_order.entry_price,
+            "exit_price": exit_order.sell_price,
+            "size": sold_size,
+            "size_ordered": exit_order.size,
+            "residual": remaining,
+            "pnl_net": round(pnl, 4),
+            "exit_type": "SCALP_MAKER" if remaining == 0 else "SCALP_PARTIAL",
+            "hold_ticks": exit_order.check_count,
+            "session_pnl": round(self._session_pnl, 4),
+            "session_trades": self._session_trades,
+            "session_win_rate": round(wr, 1),
+        })
+
+        # Clear position and exit order
+        self._exit_orders.pop(slot_id, None)
+        self._filled_positions.pop(slot_id, None)
+
+        # Reset engine -- ready for next trade on this slot
+        self._engines[slot_id] = StrategyEngine(self.strat_cfg)
+
+        return "filled"
 
     # ------------------------------------------------------------------
     # Real order execution
