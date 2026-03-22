@@ -12,12 +12,14 @@ Order lifecycle:
    - "canceled"        -> entry never filled (~60-70%), engine resets, done
    - "matched"/"gone"  -> entry filled (~30-40%), place SELL
    - partial fill      -> if total >= 5 -> place SELL; else accumulate residual
-4. SELL order placed at max(entry, ceil(mid + 2*$0.01)) (maker, 0% fee)
+4. SELL order placed at max(floor, ceil(mid + 2*$0.01)) (maker, 0% fee)
 5. SELL repaint loop: every 7s, cancel-to-check, recalculate price, re-place
    - SELL filled -> profit taken, position cleared, engine resets for next trade
    - SELL partial -> save residual (<5 = wait for next BUY; >=5 = repaint SELL)
    - SELL not filled + >7s before expiry -> repaint SELL at current mid + 2 ticks
    - SELL not filled + <7s before expiry -> cancel SELL, hold to auto-settlement
+   - SELL floor decay: after 10 checks, floor drops 1 tick per 5 checks
+     (entry+2 -> entry+1 -> entry) to avoid being stuck for minutes
 6. Market rotation -> cancel all orders, filled positions auto-settle at $0/$1
 7. Shutdown -> cancel all orders, filled positions auto-settle
 
@@ -153,6 +155,10 @@ class LiveTrader:
 
         # Exit orders: slot_id -> pending SELL order
         self._exit_orders: dict[str, TrackedExit] = {}
+
+        # SELL failure tracking (backoff to avoid spin loops)
+        self._sell_fail_count: dict[str, int] = {}
+        self._sell_retry_after: dict[str, float] = {}
 
         # Background tasks for async order placement
         self._pending_tasks: list[asyncio.Task] = []
@@ -390,12 +396,29 @@ class LiveTrader:
 
         # -- PHASE 2: If we have a filled position with no SELL, skip engine
         if slot_id in self._filled_positions and slot_id not in self._exit_orders:
-            # This shouldn't happen normally, but just in case:
-            # Re-place the SELL order
+            # Check backoff -- don't spam SELL retries
+            retry_after = self._sell_retry_after.get(slot_id, 0)
+            if time.time() < retry_after:
+                return Signal(action="NONE", side="", reason="sell_backoff")
+
+            # Give up after too many failures (hold to settlement)
+            fails = self._sell_fail_count.get(slot_id, 0)
+            if fails >= 5:
+                log.warning(
+                    "!!! [%s] SELL failed %d times -- giving up, hold to expiry",
+                    slot_id, fails,
+                )
+                # Remove from filled_positions to stop retrying
+                self._filled_positions.pop(slot_id, None)
+                self._sell_fail_count.pop(slot_id, None)
+                self._sell_retry_after.pop(slot_id, None)
+                self._engines[slot_id] = StrategyEngine(self.strat_cfg)
+                return Signal(action="NONE", side="", reason="sell_gave_up")
+
             filled = self._filled_positions[slot_id]
             log.warning(
-                "!!! [%s] Filled position without SELL order -- re-placing",
-                slot_id,
+                "!!! [%s] Filled position without SELL order -- re-placing (attempt #%d)",
+                slot_id, fails + 1,
             )
             await self._place_exit_order(slot_id, filled, state)
             return Signal(action="NONE", side="", reason="sell_replaced")
@@ -535,31 +558,41 @@ class LiveTrader:
                 size=entry.size,
             )
             self._sells_placed += 1
+            self._sell_fail_count.pop(slot_id, None)  # reset fail counter
             log.info(
                 "<<< [%s] SELL order placed: %s @ $%.2f sz=%d  "
                 "(will check fill in %.0fs)",
                 slot_id, oid[:16], sell_price, entry.size, MIN_ORDER_LIFETIME_S,
             )
         else:
+            # Track consecutive failures and apply backoff
+            fails = self._sell_fail_count.get(slot_id, 0) + 1
+            self._sell_fail_count[slot_id] = fails
+            # Exponential backoff: 5s, 10s, 20s, 30s max
+            backoff = min(30.0, 5.0 * (2 ** (fails - 1)))
+            self._sell_retry_after[slot_id] = time.time() + backoff
             log.warning(
-                "!!! [%s] SELL order FAILED to place -- holding to expiry",
-                slot_id,
+                "!!! [%s] SELL order FAILED to place (attempt #%d) "
+                "-- retry in %.0fs, else hold to expiry",
+                slot_id, fails, backoff,
             )
 
     def _compute_sell_price(self, exit_order: TrackedExit, tick: dict) -> float:
-        """Compute SELL price: mid + 2 ticks, floored at entry price.
+        """Compute SELL price: mid + 2 ticks, with decaying floor.
 
         Uses the current mid-price (avg of best_bid and best_ask) as
         reference, then adds 2 ticks ($0.02) for maker profit.
 
-        Floor at entry + 2 ticks ensures we always sell for a profit.
-        If mid drops too low, we keep SELL at entry+2 and wait for
-        the market to recover or hold to expiry.
+        Floor starts at entry + exit_ticks (e.g. +$0.02) but decays
+        after sell_decay_after_checks repaints to avoid getting stuck.
+        Decay: -1 tick every sell_decay_every_checks additional checks.
+        Absolute minimum floor = entry price (breakeven, never loss).
 
-        Examples (entry=$0.49, exit_ticks=2):
-          Market UP:   mid=$0.53 -> sell=$0.55 (profit $0.06/share)
-          Market FLAT: mid=$0.50 -> sell=$0.52 (profit $0.03/share)
-          Market DOWN: mid=$0.46 -> sell=$0.51 (floor=entry+2, min profit $0.02)
+        Examples (entry=$0.47, exit_ticks=2, decay_after=10, decay_every=5):
+          checks  0-9:  floor = $0.49 (full profit target)
+          checks 10-14: floor = $0.48 (reduced by 1 tick)
+          checks 15+:   floor = $0.47 (breakeven = entry price)
+          Market UP at any time: sell follows mid + 2 ticks (ignores floor)
         """
         prefix = "yes" if exit_order.side == "YES" else "no"
         bid_key = f"pm_{prefix}_best_bid"
@@ -567,6 +600,8 @@ class LiveTrader:
 
         best_bid = tick.get(bid_key)
         best_ask = tick.get(ask_key)
+
+        exit_ticks = self.strat_cfg.fixed_exit_ticks
 
         # Calculate mid price
         if best_bid is not None and best_ask is not None:
@@ -577,16 +612,26 @@ class LiveTrader:
             mid = best_ask
         else:
             # No market data -- fallback to entry + fixed ticks
-            exit_ticks = self.strat_cfg.fixed_exit_ticks
             return round(exit_order.entry_price + exit_ticks * TICK_SIZE, 2)
 
-        # Sell at mid + 2 ticks
+        # Sell at mid + 2 ticks (dynamic target)
         sell_price = _ceil_tick(mid + 2 * TICK_SIZE)
 
-        # Floor: never sell below entry + exit_ticks (worst case = minimum profit)
-        # This prevents repainting down to breakeven when mid drops
-        exit_ticks = self.strat_cfg.fixed_exit_ticks
-        floor_price = round(exit_order.entry_price + exit_ticks * TICK_SIZE, 2)
+        # --- Decaying floor logic ---
+        # Start with full profit floor, reduce after too many failed repaints
+        decay_after = self.strat_cfg.sell_decay_after_checks
+        decay_every = self.strat_cfg.sell_decay_every_checks
+
+        checks = exit_order.check_count
+        if checks <= decay_after:
+            # Normal: full profit floor
+            floor_ticks = exit_ticks
+        else:
+            # Decay: reduce floor by 1 tick per decay_every checks
+            ticks_lost = (checks - decay_after) // decay_every + 1
+            floor_ticks = max(0, exit_ticks - ticks_lost)
+
+        floor_price = round(exit_order.entry_price + floor_ticks * TICK_SIZE, 2)
 
         # Clamp to valid range
         return max(floor_price, min(0.99, sell_price))
@@ -716,16 +761,25 @@ class LiveTrader:
 
         else:
             # SELL not filled -- REPAINT at best current price
-            # Dynamic: MAX(entry + 2 ticks, current_bid + 1 tick)
+            # Dynamic: MAX(decaying_floor, mid + 2 ticks)
             new_sell_price = self._compute_sell_price(exit_order, tick)
             old_price = exit_order.sell_price
 
+            # Show decay status in log
+            decay_after = self.strat_cfg.sell_decay_after_checks
+            decay_tag = ""
+            if exit_order.check_count > decay_after:
+                decay_every = self.strat_cfg.sell_decay_every_checks
+                ticks_lost = (exit_order.check_count - decay_after) // decay_every + 1
+                floor_ticks = max(0, self.strat_cfg.fixed_exit_ticks - ticks_lost)
+                decay_tag = f" DECAY:{floor_ticks}t"
+
             log.info(
                 "... [%s] SELL not filled (check #%d, %.1fs) -- repainting "
-                "%s $%.2f -> $%.2f (entry=$%.2f)",
+                "%s $%.2f -> $%.2f (entry=$%.2f%s)",
                 slot_id, exit_order.check_count, age,
                 exit_order.side, old_price, new_sell_price,
-                exit_order.entry_price,
+                exit_order.entry_price, decay_tag,
             )
 
             # Re-place the SELL order at the new (possibly better) price

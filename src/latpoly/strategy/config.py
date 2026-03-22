@@ -149,6 +149,22 @@ class StrategyConfig:
         default_factory=lambda: _env_int("LATPOLY_STRAT_FIXED_EXIT_TICKS", 2)
     )
 
+    # --- SELL decay (unstick mechanism) ---
+    # After N repaint checks without fill, start reducing SELL price by 1 tick
+    # each additional N checks.  Prevents the bot from being stuck for minutes
+    # when the floor price is above the market.
+    # Floor decays from (entry + exit_ticks) down to entry (breakeven).
+    # Example: decay_after=10, decay_every=5, exit_ticks=2
+    #   checks  0-9:  floor = entry + 2 ticks (full profit)
+    #   checks 10-14: floor = entry + 1 tick  (reduced profit)
+    #   checks 15+:   floor = entry + 0 ticks (breakeven)
+    sell_decay_after_checks: int = field(
+        default_factory=lambda: _env_int("LATPOLY_STRAT_SELL_DECAY_AFTER", 10)
+    )
+    sell_decay_every_checks: int = field(
+        default_factory=lambda: _env_int("LATPOLY_STRAT_SELL_DECAY_EVERY", 5)
+    )
+
     # --- Time weight (aggression near expiry) ---
     time_weight_min: float = field(
         default_factory=lambda: _env_float("LATPOLY_STRAT_TW_MIN", 1.0)
