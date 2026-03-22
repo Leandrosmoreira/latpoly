@@ -167,13 +167,11 @@ class StrategyEngine:
     def _check_single_exit(self, pos: Position, tick: dict, tick_idx: int) -> Optional[Signal]:
         """Check if a single position should be exited.
 
-        Matches live trader behavior:
+        Exit rules (matches live trader):
         1. Hold-to-expiry: if near expiry + confident direction
-        2. Target hit: SELL maker at mid + 2 ticks (dynamic, like live repaint)
-           - Floor at entry price (never sell at loss, like live)
+        2. Target hit: instant exit when mid >= entry + fixed_exit_ticks
         3. NO stop loss (live has floor at entry, not stop loss)
-        4. NO timeout (live repaints SELL until expiry)
-        5. Expiry fallback: if position held to market settlement
+        4. NO timeout (live repaints SELL until expiry, holds to settlement)
         """
         tte_ms = tick.get("time_to_expiry_ms")
         tte_s = (tte_ms / 1000.0) if tte_ms is not None else 999.0
@@ -190,38 +188,12 @@ class StrategyEngine:
                     size=pos.size, tick_idx=tick_idx,
                 )
 
-        # --- Exit by target (maker SELL at mid + 2 ticks, floored at entry) ---
-        # This mirrors the live trader's _compute_sell_price() logic:
-        #   sell = max(entry_price, ceil_tick(mid + 2 * $0.01))
-        prefix = "yes" if pos.side == "YES" else "no"
-        mid_key = f"mid_{prefix}"
+        # --- Exit by target: mid >= entry + N ticks (maker, 0% fee) ---
+        mid_key = "mid_yes" if pos.side == "YES" else "mid_no"
         mid = tick.get(mid_key)
-
-        if mid is not None and self.cfg.fixed_exit_ticks > 0:
-            # Dynamic sell price: mid + 2 ticks, floored at entry (like live repaint)
-            import math as _math
-            sell_price = _math.ceil((mid + self.cfg.fixed_exit_ticks * 0.01) / 0.01) * 0.01
-            sell_price = max(pos.entry_price, min(0.99, sell_price))
-
-            # Check if the current best_bid can fill our SELL
-            # (simulates: is there a buyer at our sell_price?)
-            bid_key = f"pm_{prefix}_best_bid"
-            best_bid = tick.get(bid_key)
-            if best_bid is not None and best_bid >= sell_price:
-                # Someone is bidding at or above our sell price -> SELL fills!
-                exit_price = sell_price  # maker fill at our price
-                pnl = self._compute_pnl(pos, exit_price, is_maker=True)
-                self._record_trade(pos, exit_price, "MAKER", pnl, tick_idx)
-                return Signal(
-                    action="EXIT", side=pos.side,
-                    reason=f"sell_filled mid={mid:.4f} sell={sell_price:.4f} bid={best_bid:.4f}",
-                    exit_price=exit_price, size=pos.size, tick_idx=tick_idx,
-                )
-
-        elif mid is not None and pos.exit_target is not None:
-            # Fallback for dynamic exit (fixed_exit_ticks=0)
+        if mid is not None and pos.exit_target is not None:
             if mid >= pos.exit_target:
-                exit_price = pos.exit_target
+                exit_price = pos.exit_target  # maker fill at target
                 pnl = self._compute_pnl(pos, exit_price, is_maker=True)
                 self._record_trade(pos, exit_price, "MAKER", pnl, tick_idx)
                 return Signal(
@@ -230,9 +202,9 @@ class StrategyEngine:
                     exit_price=exit_price, size=pos.size, tick_idx=tick_idx,
                 )
 
-        # --- NO stop loss (live has floor at entry price, never sells at loss) ---
-        # --- NO timeout (live repaints SELL order until expiry) ---
-        # Position is held until SELL fills or market settles.
+        # --- NO stop loss ---
+        # --- NO timeout ---
+        # Position held until target hit or market settlement.
 
         return None  # still holding
 
@@ -325,12 +297,11 @@ class StrategyEngine:
         prefix = "yes" if side == "YES" else "no"
 
         if cfg.entry_as_maker:
-            # Maker entry: best_bid + 1 tick for queue priority (like live trader)
+            # Maker entry: bid at best_bid (0% fee)
             bid_key = f"pm_{prefix}_best_bid"
             entry_price = tick.get(bid_key)
             if entry_price is None:
                 return Signal(action="NONE", side="", reason="no_bid_price")
-            entry_price = round(entry_price + 0.01, 2)  # +1 tick for queue priority
             slippage = 0.0
             entry_fee_per_contract = 0.0
         else:
