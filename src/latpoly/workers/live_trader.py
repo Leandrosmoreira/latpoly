@@ -365,6 +365,9 @@ class LiveTrader:
 
                 if total >= min_lot:
                     # Enough for maker SELL -- place exit order
+                    # Wait 2s for on-chain settlement before SELL
+                    # (avoids 400 "not enough balance/allowance" from PM API)
+                    await asyncio.sleep(2.0)
                     await self._place_exit_order(slot_id, pending, state)
                     return Signal(action="NONE", side="", reason="entry_filled_sell_placed")
                 else:
@@ -418,6 +421,8 @@ class LiveTrader:
                 "!!! [%s] Filled position without SELL order -- re-placing (attempt #%d)",
                 slot_id, fails + 1,
             )
+            # Wait 2s for on-chain settlement before SELL retry
+            await asyncio.sleep(2.0)
             await self._place_exit_order(slot_id, filled, state)
             return Signal(action="NONE", side="", reason="sell_replaced")
 
@@ -455,13 +460,16 @@ class LiveTrader:
             buy_size = self._compute_buy_size(slot_id)
             residual_shares = self._get_residual(slot_id)
 
-            # Place 1 tick above best_bid for queue priority
+            # Place at best_ask for aggressive fill (still maker if ask has depth)
             pm = state.get_polymarket(slot_id)
             if signal.side == "YES":
+                best_ask = pm.yes_best_ask or signal.entry_price
                 best_bid = pm.yes_best_bid or signal.entry_price
             else:
+                best_ask = pm.no_best_ask or signal.entry_price
                 best_bid = pm.no_best_bid or signal.entry_price
-            entry_price = round(best_bid + TICK_SIZE, 2)
+            # Use best_ask for higher fill rate; fallback to bid+1 if ask unavailable
+            entry_price = round(best_ask if best_ask else best_bid + TICK_SIZE, 2)
 
             total_after = residual_shares + buy_size
             log.info(
