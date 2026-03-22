@@ -552,12 +552,14 @@ class LiveTrader:
         Uses the current mid-price (avg of best_bid and best_ask) as
         reference, then adds 2 ticks ($0.02) for maker profit.
 
-        Floor at entry_price ensures we never sell at a loss.
+        Floor at entry + 2 ticks ensures we always sell for a profit.
+        If mid drops too low, we keep SELL at entry+2 and wait for
+        the market to recover or hold to expiry.
 
-        Examples (entry=$0.49):
+        Examples (entry=$0.49, exit_ticks=2):
           Market UP:   mid=$0.53 -> sell=$0.55 (profit $0.06/share)
           Market FLAT: mid=$0.50 -> sell=$0.52 (profit $0.03/share)
-          Market DOWN: mid=$0.46 -> sell=$0.49 (floor=entry, breakeven)
+          Market DOWN: mid=$0.46 -> sell=$0.51 (floor=entry+2, min profit $0.02)
         """
         prefix = "yes" if exit_order.side == "YES" else "no"
         bid_key = f"pm_{prefix}_best_bid"
@@ -581,8 +583,10 @@ class LiveTrader:
         # Sell at mid + 2 ticks
         sell_price = _ceil_tick(mid + 2 * TICK_SIZE)
 
-        # Floor: never sell below entry price (worst case = breakeven)
-        floor_price = exit_order.entry_price
+        # Floor: never sell below entry + exit_ticks (worst case = minimum profit)
+        # This prevents repainting down to breakeven when mid drops
+        exit_ticks = self.strat_cfg.fixed_exit_ticks
+        floor_price = round(exit_order.entry_price + exit_ticks * TICK_SIZE, 2)
 
         # Clamp to valid range
         return max(floor_price, min(0.99, sell_price))
