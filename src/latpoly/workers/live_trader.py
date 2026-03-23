@@ -422,8 +422,10 @@ class LiveTrader:
                     slot_id, fails, loss, filled.side, filled.price, filled.size,
                     self._session_trades, wr, self._session_pnl,
                 )
-                # Remove from filled_positions to stop retrying
+                # Remove from filled_positions AND residual to stop retrying
+                # (must clear both to avoid double-counting loss)
                 self._filled_positions.pop(slot_id, None)
+                self._residual.pop(slot_id, None)
                 self._sell_fail_count.pop(slot_id, None)
                 self._sell_retry_after.pop(slot_id, None)
                 self._engines[slot_id] = StrategyEngine(self.strat_cfg)

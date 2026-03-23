@@ -236,17 +236,19 @@ class PolyClient:
 
         except Exception as e:
             err = str(e).lower()
+            log.error(
+                "SELL exception: px=%.2f sz=%d token=%s... error=%s",
+                price, size, token_id[:16], e,
+            )
             if "not enough balance" in err or "allowance" in err:
                 # Retry with fresh token approval
-                log.info("SELL failed, retrying with fresh token approval...")
+                log.info("SELL failed (balance/allowance), retrying with fresh approval...")
                 self._approved_tokens.discard(token_id)
                 if await self.approve_token(token_id):
                     return await self._place_limit_sell_inner(
                         token_id, price, size
                     )
-                log.error("SELL failed (balance/allowance) after retry: %s", e)
-            else:
-                log.error("SELL failed: %s", e)
+                log.error("SELL failed after re-approval: %s", e)
             return None
 
     async def _place_limit_sell_inner(
@@ -264,8 +266,8 @@ class PolyClient:
             if resp and resp.get("success"):
                 return resp.get("orderID", resp.get("order_id", ""))
             return None
-        except Exception:
-            log.exception("SELL retry failed")
+        except Exception as e:
+            log.error("SELL retry failed: px=%.2f sz=%d error=%s", price, size, e)
             return None
 
     # ------------------------------------------------------------------
