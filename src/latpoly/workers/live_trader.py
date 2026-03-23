@@ -365,9 +365,9 @@ class LiveTrader:
 
                 if total >= min_lot:
                     # Enough for maker SELL -- place exit order
-                    # Wait 2s for on-chain settlement before SELL
+                    # Wait 5s for on-chain settlement before SELL
                     # (avoids 400 "not enough balance/allowance" from PM API)
-                    await asyncio.sleep(2.0)
+                    await asyncio.sleep(5.0)
                     await self._place_exit_order(slot_id, pending, state)
                     return Signal(action="NONE", side="", reason="entry_filled_sell_placed")
                 else:
@@ -405,9 +405,22 @@ class LiveTrader:
             # Give up after too many failures (hold to settlement)
             fails = self._sell_fail_count.get(slot_id, 0)
             if fails >= 5:
+                filled = self._filled_positions[slot_id]
+                # Count as LOSS: assume shares expire worthless (worst case)
+                loss = filled.price * filled.size
+                self._session_trades += 1
+                self._session_pnl -= loss
+                self._slot_trades[slot_id] = self._slot_trades.get(slot_id, 0) + 1
+                self._slot_pnl[slot_id] = self._slot_pnl.get(slot_id, 0.0) - loss
+                wr = (
+                    self._session_wins / self._session_trades * 100
+                    if self._session_trades else 0
+                )
                 log.warning(
-                    "!!! [%s] SELL failed %d times -- giving up, hold to expiry",
-                    slot_id, fails,
+                    "!!! [%s] SELL failed %d times -- giving up, hold to expiry. "
+                    "LOSS=$-%.2f (%s @ $%.2f × %d)  [session: %d trades, %.0f%% WR, $%+.2f]",
+                    slot_id, fails, loss, filled.side, filled.price, filled.size,
+                    self._session_trades, wr, self._session_pnl,
                 )
                 # Remove from filled_positions to stop retrying
                 self._filled_positions.pop(slot_id, None)
@@ -421,8 +434,8 @@ class LiveTrader:
                 "!!! [%s] Filled position without SELL order -- re-placing (attempt #%d)",
                 slot_id, fails + 1,
             )
-            # Wait 2s for on-chain settlement before SELL retry
-            await asyncio.sleep(2.0)
+            # Wait 5s for on-chain settlement before SELL retry
+            await asyncio.sleep(5.0)
             await self._place_exit_order(slot_id, filled, state)
             return Signal(action="NONE", side="", reason="sell_replaced")
 
@@ -444,10 +457,21 @@ class LiveTrader:
             # Check if residual exists but wrong side -- clear it
             residual = self._residual.get(slot_id)
             if residual and residual["side"] != signal.side:
+                # Count as LOSS: wrong-side residual will expire worthless
+                res_loss = residual["avg_entry"] * residual["shares"]
+                self._session_trades += 1
+                self._session_pnl -= res_loss
+                self._slot_trades[slot_id] = self._slot_trades.get(slot_id, 0) + 1
+                self._slot_pnl[slot_id] = self._slot_pnl.get(slot_id, 0.0) - res_loss
+                wr = (
+                    self._session_wins / self._session_trades * 100
+                    if self._session_trades else 0
+                )
                 log.warning(
                     "!!! [%s] Residual %d %s shares but signal is %s -- "
-                    "residual will auto-settle at expiry",
+                    "LOSS=$-%.2f  [session: %d trades, %.0f%% WR, $%+.2f]",
                     slot_id, residual["shares"], residual["side"], signal.side,
+                    res_loss, self._session_trades, wr, self._session_pnl,
                 )
                 self._residual.pop(slot_id, None)
 
@@ -892,22 +916,34 @@ class LiveTrader:
                     slot_id,
                 )
 
-        # Filled positions auto-settle -- just clear tracking
+        # Filled positions auto-settle -- count as LOSS (worst case)
         filled = self._filled_positions.pop(slot_id, None)
         if filled:
-            log.info(
-                "~~~ [%s] Rotation with filled position (%s @ $%.2f) -- "
-                "will auto-settle at expiry",
-                slot_id, filled.side, filled.price,
+            loss = filled.price * filled.size
+            self._session_trades += 1
+            self._session_pnl -= loss
+            self._slot_trades[slot_id] = self._slot_trades.get(slot_id, 0) + 1
+            self._slot_pnl[slot_id] = self._slot_pnl.get(slot_id, 0.0) - loss
+            log.warning(
+                "~~~ [%s] Rotation with filled position (%s @ $%.2f × %d) -- "
+                "LOSS=$-%.2f  [session: $%+.2f]",
+                slot_id, filled.side, filled.price, filled.size,
+                loss, self._session_pnl,
             )
 
-        # Residual shares also auto-settle at expiry
+        # Residual shares also auto-settle -- count as LOSS
         residual = self._residual.pop(slot_id, None)
         if residual:
-            log.info(
+            res_loss = residual["avg_entry"] * residual["shares"]
+            self._session_trades += 1
+            self._session_pnl -= res_loss
+            self._slot_trades[slot_id] = self._slot_trades.get(slot_id, 0) + 1
+            self._slot_pnl[slot_id] = self._slot_pnl.get(slot_id, 0.0) - res_loss
+            log.warning(
                 "~~~ [%s] Rotation with %d residual %s shares -- "
-                "will auto-settle at expiry",
+                "LOSS=$-%.2f  [session: $%+.2f]",
                 slot_id, residual["shares"], residual["side"],
+                res_loss, self._session_pnl,
             )
 
         # Reset engine for this slot
