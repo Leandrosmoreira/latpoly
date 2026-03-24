@@ -132,10 +132,10 @@ class PolyClient:
     # ------------------------------------------------------------------
 
     async def get_token_balance(self, token_id: str) -> int:
-        """Check how many conditional tokens are in the wallet on-chain.
+        """Check how many conditional token SHARES are in the wallet.
 
-        Returns the number of shares held, or 0 on failure.
-        Uses the /balance-allowance endpoint.
+        Returns number of shares (not raw units).
+        Polymarket uses 6 decimals: 1 share = 1,000,000 raw units.
         """
         if not self._client:
             return 0
@@ -148,14 +148,15 @@ class PolyClient:
                 self._client.get_balance_allowance, params
             )
             if isinstance(result, dict):
-                # Parse balance from response (Wei units for ERC1155)
                 raw = result.get("balance", 0)
-                balance = int(float(str(raw))) if raw else 0
+                raw_int = int(float(str(raw))) if raw else 0
+                # Convert from raw units (6 decimals) to shares
+                shares = raw_int // 1_000_000
                 log.debug(
-                    "Token balance for %s...: %d (raw=%s)",
-                    token_id[:16], balance, result,
+                    "Token balance for %s...: %d shares (raw=%d)",
+                    token_id[:16], shares, raw_int,
                 )
-                return balance
+                return shares
             return 0
         except Exception as e:
             log.debug("get_token_balance failed for %s...: %s", token_id[:16], e)
