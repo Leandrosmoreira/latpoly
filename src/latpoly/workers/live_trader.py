@@ -755,50 +755,53 @@ class LiveTrader:
             return "holding"
 
         else:
-            # NOT FILLED after first check -- repaint to best bid
-            # Cancel old order and re-place at best available price
+            # NOT FILLED -- repaint to best bid, but ONLY if profitable
+            # Minimum sell price = entry + 2 ticks (guaranteed profit)
+            min_sell = round(exit_order.entry_price + self.strat_cfg.fixed_exit_ticks * TICK_SIZE, 2)
             prefix = "yes" if exit_order.side == "YES" else "no"
             best_bid = tick.get(f"pm_{prefix}_best_bid")
 
-            if best_bid is not None and best_bid != exit_order.sell_price:
-                # Cancel old SELL
-                await self._poly.cancel_order(exit_order.order_id)
+            if best_bid is not None:
                 new_price = round(best_bid, 2)
-                # Never sell below $0.01
-                new_price = max(0.01, min(0.99, new_price))
+                # NEVER sell below entry + 2 ticks
+                new_price = max(min_sell, min(0.99, new_price))
 
-                log.info(
-                    "<<< [%s] SELL REPAINT: %s $%.2f -> $%.2f (best_bid) "
-                    "entry=$%.2f sz=%d",
-                    slot_id, exit_order.side, exit_order.sell_price,
-                    new_price, exit_order.entry_price, exit_order.size,
-                )
-
-                oid = await self._poly.place_limit_sell(
-                    exit_order.token_id, new_price, exit_order.size,
-                )
-                if oid:
-                    exit_order.order_id = oid
-                    exit_order.sell_price = new_price
-                    exit_order.created_at = time.time()
-                    exit_order.check_count = 0
-                else:
-                    # SELL repaint failed -- keep old order (might still be live)
-                    log.warning(
-                        "!!! [%s] SELL repaint FAILED, retrying next check",
-                        slot_id,
+                if new_price != exit_order.sell_price:
+                    # Cancel old SELL and repaint at better price
+                    await self._poly.cancel_order(exit_order.order_id)
+                    log.info(
+                        "<<< [%s] SELL REPAINT: %s $%.2f -> $%.2f (best_bid=$%.2f, floor=$%.2f) "
+                        "entry=$%.2f sz=%d",
+                        slot_id, exit_order.side, exit_order.sell_price,
+                        new_price, best_bid, min_sell,
+                        exit_order.entry_price, exit_order.size,
                     )
+                    oid = await self._poly.place_limit_sell(
+                        exit_order.token_id, new_price, exit_order.size,
+                    )
+                    if oid:
+                        exit_order.order_id = oid
+                        exit_order.sell_price = new_price
+                        exit_order.created_at = time.time()
+                        exit_order.check_count = 0
+                    else:
+                        log.warning(
+                            "!!! [%s] SELL repaint FAILED, retrying next check",
+                            slot_id,
+                        )
+                        exit_order.created_at = time.time()
+                else:
+                    # Same price -- keep waiting
+                    if exit_order.check_count % 10 == 0:
+                        log.info(
+                            "... [%s] SELL pending (check #%d) -- %s @ $%.2f "
+                            "(entry=$%.2f, best_bid=$%.2f, floor=$%.2f)",
+                            slot_id, exit_order.check_count,
+                            exit_order.side, exit_order.sell_price,
+                            exit_order.entry_price, best_bid, min_sell,
+                        )
                     exit_order.created_at = time.time()
             else:
-                # No better price or same price -- keep waiting
-                if exit_order.check_count % 10 == 0:
-                    log.info(
-                        "... [%s] SELL pending (check #%d) -- %s @ $%.2f "
-                        "(entry=$%.2f, best_bid=$%s)",
-                        slot_id, exit_order.check_count,
-                        exit_order.side, exit_order.sell_price,
-                        exit_order.entry_price, best_bid,
-                    )
                 exit_order.created_at = time.time()
             return "holding"
 
