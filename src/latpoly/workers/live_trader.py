@@ -308,13 +308,32 @@ class LiveTrader:
             result = await self._poly.cancel_order(pending.order_id)
             self._entry_orders.pop(slot_id, None)
 
-            if result in ("matched", "gone", "failed"):
-                # Entry was FILLED (fully or partially)
-                # Check actual filled size via API
+            if result == "matched":
+                # Cancel confirmed order was filled
                 filled_size = await self._poly.get_filled_size(pending.order_id)
                 if filled_size <= 0:
                     # API didn't return size -- assume full fill
                     filled_size = pending.size
+
+            elif result in ("gone", "failed"):
+                # Ambiguous: order might or might not be filled
+                # MUST verify via GET before assuming fill
+                filled_size = await self._poly.get_filled_size(pending.order_id)
+                if filled_size <= 0:
+                    # No confirmed fill -- treat as NOT filled
+                    self._orders_cancelled += 1
+                    log.info(
+                        "--- [%s] Entry cancel=%s but NO confirmed fill "
+                        "(get_filled_size=0) -- treating as NOT filled. "
+                        "Resetting engine.",
+                        slot_id, result,
+                    )
+                    self._engines[slot_id] = StrategyEngine(self.strat_cfg)
+                    return Signal(action="NONE", side="", reason="entry_unconfirmed")
+
+            if result in ("matched", "gone", "failed") and (
+                result == "matched" or filled_size > 0
+            ):
 
                 self._orders_filled += 1
 
@@ -919,7 +938,11 @@ class LiveTrader:
                 )
 
         # Filled positions auto-settle -- count as LOSS (worst case)
+        # NOTE: filled_positions and residual track the SAME shares,
+        # so only count ONE of them to avoid double-counting.
         filled = self._filled_positions.pop(slot_id, None)
+        residual = self._residual.pop(slot_id, None)
+
         if filled:
             loss = filled.price * filled.size
             self._session_trades += 1
@@ -932,10 +955,8 @@ class LiveTrader:
                 slot_id, filled.side, filled.price, filled.size,
                 loss, self._session_pnl,
             )
-
-        # Residual shares also auto-settle -- count as LOSS
-        residual = self._residual.pop(slot_id, None)
-        if residual:
+        elif residual:
+            # Only count residual if no filled_positions (avoid double-count)
             res_loss = residual["avg_entry"] * residual["shares"]
             self._session_trades += 1
             self._session_pnl -= res_loss
