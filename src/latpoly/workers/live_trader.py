@@ -993,6 +993,66 @@ class LiveTrader:
         self._engines[slot_id] = StrategyEngine(self.strat_cfg)
 
     # ------------------------------------------------------------------
+    # Recover orphan positions on startup / rotation
+    # ------------------------------------------------------------------
+
+    async def recover_orphan_positions(
+        self, slot_id: str, yes_token_id: str, no_token_id: str,
+        yes_best_bid: float | None, no_best_bid: float | None,
+    ) -> None:
+        """Check on-chain balance for both tokens and place SELL for any
+        orphaned positions (from restart or prior session).
+
+        Since we don't know the original entry price, we sell at
+        best_bid (maximize exit price). The SELL hangs in the book
+        until filled or market expires.
+        """
+        for side, token_id, best_bid in [
+            ("YES", yes_token_id, yes_best_bid),
+            ("NO", no_token_id, no_best_bid),
+        ]:
+            # Skip if we already have a SELL or filled position for this slot
+            if slot_id in self._exit_orders or slot_id in self._filled_positions:
+                continue
+
+            balance = await self._poly.get_token_balance(token_id)
+            if balance < self.strat_cfg.min_maker_size:
+                continue
+
+            # Found orphan tokens! Place SELL at best_bid
+            sell_price = round(best_bid, 2) if best_bid else 0.50
+            sell_price = max(0.01, min(0.99, sell_price))
+
+            log.warning(
+                ">>> [%s] ORPHAN RECOVERY: found %d %s tokens on-chain. "
+                "Placing SELL @ $%.2f (best_bid)",
+                slot_id, balance, side, sell_price,
+            )
+
+            oid = await self._poly.place_limit_sell(
+                token_id, sell_price, balance,
+            )
+            if oid:
+                self._exit_orders[slot_id] = TrackedExit(
+                    order_id=oid,
+                    slot_id=slot_id,
+                    token_id=token_id,
+                    side=side,
+                    entry_price=sell_price,  # unknown, use sell as proxy
+                    sell_price=sell_price,
+                    size=balance,
+                )
+                log.info(
+                    "<<< [%s] ORPHAN SELL placed: %s @ $%.2f sz=%d",
+                    slot_id, oid[:16], sell_price, balance,
+                )
+            else:
+                log.warning(
+                    "!!! [%s] ORPHAN SELL failed to place for %d %s tokens",
+                    slot_id, balance, side,
+                )
+
+    # ------------------------------------------------------------------
     # Shutdown
     # ------------------------------------------------------------------
 
@@ -1204,8 +1264,14 @@ async def live_trader_worker(
                         # so approval is confirmed before first SELL attempt
                         yes_tok = pm.market.yes_token_id
                         no_tok = pm.market.no_token_id
-                        asyncio.create_task(trader._poly.approve_token(yes_tok))
-                        asyncio.create_task(trader._poly.approve_token(no_tok))
+                        await trader._poly.approve_token(yes_tok)
+                        await trader._poly.approve_token(no_tok)
+
+                        # Recover orphan positions from restart/prior session
+                        await trader.recover_orphan_positions(
+                            sid, yes_tok, no_tok,
+                            pm.yes_best_bid, pm.no_best_bid,
+                        )
 
                     # Build normalized tick (same as paper trader)
                     tick = build_normalized_tick(
