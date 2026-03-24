@@ -1180,6 +1180,13 @@ async def live_trader_worker(
                         ss.last_condition_id = cid
                         log.info("Live trader [%s]: market rotated -> %s", sid, cid[:12])
 
+                        # Pre-approve BOTH tokens for SELL (on-chain tx)
+                        # so approval is confirmed before first SELL attempt
+                        yes_tok = pm.market.yes_token_id
+                        no_tok = pm.market.no_token_id
+                        asyncio.create_task(trader._poly.approve_token(yes_tok))
+                        asyncio.create_task(trader._poly.approve_token(no_tok))
+
                     # Build normalized tick (same as paper trader)
                     tick = build_normalized_tick(
                         bn, pm,
