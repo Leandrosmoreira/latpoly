@@ -724,12 +724,7 @@ class LiveTrader:
         order_data = await self._poly.get_order(exit_order.order_id)
 
         if order_data is None:
-            # Can't reach API -- keep waiting, order is still in book
-            log.debug(
-                "... [%s] SELL check #%d -- API unreachable, order still in book",
-                slot_id, exit_order.check_count,
-            )
-            exit_order.created_at = time.time()  # reset timer for next check
+            exit_order.created_at = time.time()
             return "holding"
 
         # Parse fill status from order data
@@ -751,29 +746,60 @@ class LiveTrader:
             return self._record_sell_fill(slot_id, exit_order, sold_size)
 
         elif size_matched > 0:
-            # PARTIAL FILL -- some shares sold, rest still in book
-            # Log progress but keep waiting for full fill
             log.info(
-                "... [%s] SELL partial progress: %d of %d filled (check #%d, %.0fs) "
-                "-- order still in book",
+                "... [%s] SELL partial: %d of %d filled (check #%d)",
                 slot_id, size_matched, exit_order.size,
-                exit_order.check_count, age,
+                exit_order.check_count,
             )
-            exit_order.created_at = time.time()  # reset timer for next check
+            exit_order.created_at = time.time()
             return "holding"
 
         else:
-            # NOT FILLED YET -- order still hanging in book, keep waiting
-            if exit_order.check_count % 10 == 0:
-                # Log every 10th check (~70s) to avoid spam
+            # NOT FILLED after first check -- repaint to best bid
+            # Cancel old order and re-place at best available price
+            prefix = "yes" if exit_order.side == "YES" else "no"
+            best_bid = tick.get(f"pm_{prefix}_best_bid")
+
+            if best_bid is not None and best_bid != exit_order.sell_price:
+                # Cancel old SELL
+                await self._poly.cancel_order(exit_order.order_id)
+                new_price = round(best_bid, 2)
+                # Never sell below $0.01
+                new_price = max(0.01, min(0.99, new_price))
+
                 log.info(
-                    "... [%s] SELL pending (check #%d, %.0fs) -- %s @ $%.2f "
-                    "hanging in book (entry=$%.2f)",
-                    slot_id, exit_order.check_count, age,
-                    exit_order.side, exit_order.sell_price,
-                    exit_order.entry_price,
+                    "<<< [%s] SELL REPAINT: %s $%.2f -> $%.2f (best_bid) "
+                    "entry=$%.2f sz=%d",
+                    slot_id, exit_order.side, exit_order.sell_price,
+                    new_price, exit_order.entry_price, exit_order.size,
                 )
-            exit_order.created_at = time.time()  # reset timer for next check
+
+                oid = await self._poly.place_limit_sell(
+                    exit_order.token_id, new_price, exit_order.size,
+                )
+                if oid:
+                    exit_order.order_id = oid
+                    exit_order.sell_price = new_price
+                    exit_order.created_at = time.time()
+                    exit_order.check_count = 0
+                else:
+                    # SELL repaint failed -- keep old order (might still be live)
+                    log.warning(
+                        "!!! [%s] SELL repaint FAILED, retrying next check",
+                        slot_id,
+                    )
+                    exit_order.created_at = time.time()
+            else:
+                # No better price or same price -- keep waiting
+                if exit_order.check_count % 10 == 0:
+                    log.info(
+                        "... [%s] SELL pending (check #%d) -- %s @ $%.2f "
+                        "(entry=$%.2f, best_bid=$%s)",
+                        slot_id, exit_order.check_count,
+                        exit_order.side, exit_order.sell_price,
+                        exit_order.entry_price, best_bid,
+                    )
+                exit_order.created_at = time.time()
             return "holding"
 
     def _record_sell_fill(
