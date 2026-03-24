@@ -3,23 +3,25 @@
 Mirrors paper_trader_worker but places real orders via Polymarket CLOB API.
 Only operates on BTC slots (filters out ETH due to low liquidity).
 
-Order lifecycle:
-1. Engine BUY signal  -> place GTC limit BUY at best_bid (maker, 0% fee)
-   - BUY size: min 5 shares (maker minimum). With residual, rounds up to next
-     multiple of 5 (e.g. residual=2 -> buy 8 -> total 10 = 2 SELL lots)
-2. Freeze slot for MIN_ORDER_LIFETIME_S (~7s, don't feed engine, let order fill)
-3. After freeze, cancel order to check fill status:
-   - "canceled"        -> entry never filled (~60-70%), engine resets, done
-   - "matched"/"gone"  -> entry filled (~30-40%), place SELL
-   - partial fill      -> if total >= 5 -> place SELL; else accumulate residual
-4. SELL order placed at entry + exit_ticks × $0.01 (maker, 0% fee)
-5. SELL hangs in book — checked via GET (no cancel/re-place):
-   - SELL filled -> profit taken, position cleared, engine resets for next trade
-   - SELL partial fill detected -> log progress, keep waiting
-   - SELL not filled -> leave order in book, check again in 7s
-   - Near expiry (<7s) -> cancel SELL, hold to auto-settlement
-6. Market rotation -> cancel all orders, filled positions auto-settle at $0/$1
-7. Shutdown -> cancel all orders, filled positions auto-settle
+State machine (11 states):
+  IDLE -> ENTRY_PLACING -> ENTRY_WAIT_FILL (3s)
+    -> ENTRY_REPRICE (cancel, reposition best_ask, wait 3s; max 3x)
+    -> ENTRY_FILLED -> POST_ENTRY_SETTLEMENT (3s on-chain wait)
+    -> POSITION_CONFIRM (balance check) -> EXIT_PLACING
+    -> EXIT_WAIT_FILL (check every 5s, repaint at best_bid >= entry+2)
+    -> TRADE_COMPLETE -> IDLE (no cooldown)
+
+Timing:
+  - Entry wait: 3s (MIN_ORDER_LIFETIME_S)
+  - Entry reprice: up to 3x (MAX_ENTRY_REPRICE), ~12s max total
+  - Settlement wait: 3s (on-chain token settlement)
+  - SELL check: every 5s (EXIT_CHECK_INTERVAL_S)
+  - Expiry cancel: 7s before market expiry (EXPIRY_CANCEL_S)
+
+SELL rules:
+  - Price floor: entry + 2 ticks (guaranteed profit, never sells at loss)
+  - Repaint: follows best_bid but never below floor
+  - Hangs in book until filled or market expires
 
 Logs trades to data/live/ in same JSONL format as paper_trader.
 """
@@ -50,10 +52,16 @@ TICK_SIZE = 0.01
 # Minimum seconds an entry order must live before we check fill status.
 # Without this, the engine exits on the very next tick (~0.2s) and the
 # maker order never has time to fill on the exchange.
-MIN_ORDER_LIFETIME_S = float(os.environ.get("LATPOLY_MIN_ORDER_LIFE", "7"))
+MIN_ORDER_LIFETIME_S = float(os.environ.get("LATPOLY_MIN_ORDER_LIFE", "3"))
+
+# Seconds between SELL fill checks (GET order status)
+EXIT_CHECK_INTERVAL_S = float(os.environ.get("LATPOLY_EXIT_CHECK_S", "5"))
 
 # Seconds before expiry to cancel SELL and hold to auto-settlement
 EXPIRY_CANCEL_S = float(os.environ.get("LATPOLY_EXPIRY_CANCEL_S", "7"))
+
+# Max times to reprice entry BUY before giving up
+MAX_ENTRY_REPRICE = int(os.environ.get("LATPOLY_MAX_ENTRY_REPRICE", "3"))
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +96,7 @@ class TrackedEntry:
     size: int
     tick_idx: int
     created_at: float = field(default_factory=time.time)
+    reprice_count: int = 0  # how many times entry was repriced
 
 
 @dataclass
@@ -367,8 +376,8 @@ class LiveTrader:
                         "avg_entry": pending.price,
                     }
                     log.info(
-                        ">>> [%s] Entry FILLED after %.1fs (cancel=%s) -- "
-                        "%s @ $%.2f sz=%d (of %d ordered)",
+                        ">>> [%s] STATE: ENTRY_WAIT_FILL -> ENTRY_FILLED "
+                        "after %.1fs (cancel=%s) -- %s @ $%.2f sz=%d (of %d ordered)",
                         slot_id, age, result,
                         pending.side, pending.price, filled_size, pending.size,
                     )
@@ -384,9 +393,12 @@ class LiveTrader:
 
                 if total >= min_lot:
                     # Enough for maker SELL -- place exit order
-                    # Wait 5s for on-chain settlement before SELL
-                    # (avoids 400 "not enough balance/allowance" from PM API)
-                    await asyncio.sleep(5.0)
+                    log.info(
+                        ">>> [%s] STATE: ENTRY_FILLED -> POST_ENTRY_SETTLEMENT "
+                        "(waiting 3s for on-chain settlement)",
+                        slot_id,
+                    )
+                    await asyncio.sleep(3.0)
                     await self._place_exit_order(slot_id, pending, state)
                     return Signal(action="NONE", side="", reason="entry_filled_sell_placed")
                 else:
@@ -402,15 +414,48 @@ class LiveTrader:
                     # But allow engine to generate new BUY signal
                     self._filled_positions.pop(slot_id, None)
                     return Signal(action="NONE", side="", reason="partial_fill_accumulating")
-            else:
-                # Entry NOT filled -- cancel succeeded
+            elif result == "canceled":
+                # Entry NOT filled -- try reprice if under limit
+                if pending.reprice_count < MAX_ENTRY_REPRICE:
+                    # Reprice: reposition at current best_ask
+                    pm = state.get_polymarket(slot_id)
+                    if pending.side == "YES":
+                        new_price = pm.yes_best_ask or pm.yes_best_bid or pending.price
+                    else:
+                        new_price = pm.no_best_ask or pm.no_best_bid or pending.price
+                    new_price = round(new_price, 2)
+
+                    pending.reprice_count += 1
+                    log.info(
+                        ">>> [%s] STATE: ENTRY_WAIT_FILL -> ENTRY_REPRICE "
+                        "(reprice #%d/%d) $%.2f -> $%.2f",
+                        slot_id, pending.reprice_count, MAX_ENTRY_REPRICE,
+                        pending.price, new_price,
+                    )
+
+                    oid = await self._poly.place_limit_buy(
+                        pending.token_id, new_price, pending.size,
+                    )
+                    if oid:
+                        pending.order_id = oid
+                        pending.price = new_price
+                        pending.created_at = time.time()
+                        self._entry_orders[slot_id] = pending
+                        self._orders_placed += 1
+                        return Signal(action="NONE", side="", reason="entry_repriced")
+                    else:
+                        log.warning(
+                            "!!! [%s] Entry reprice FAILED to place -- giving up",
+                            slot_id,
+                        )
+
+                # Max reprices exhausted or reprice failed -- give up
                 self._orders_cancelled += 1
                 log.info(
-                    "--- [%s] Entry NOT filled after %.1fs -- cancelled. "
-                    "Resetting engine.",
-                    slot_id, age,
+                    "--- [%s] STATE: ENTRY_WAIT_FILL -> IDLE "
+                    "(not filled after %.1fs, %d reprices). Resetting engine.",
+                    slot_id, age, pending.reprice_count,
                 )
-                # Reset the engine so it doesn't think it has a position
                 self._engines[slot_id] = StrategyEngine(self.strat_cfg)
                 return Signal(action="NONE", side="", reason="entry_cancelled")
 
@@ -432,7 +477,7 @@ class LiveTrader:
                 slot_id, fails + 1,
             )
             # Wait for on-chain settlement before SELL retry
-            await asyncio.sleep(5.0)
+            await asyncio.sleep(3.0)
             await self._place_exit_order(slot_id, filled, state)
             return Signal(action="NONE", side="", reason="sell_replaced")
 
@@ -612,9 +657,9 @@ class LiveTrader:
             self._sells_placed += 1
             self._sell_fail_count.pop(slot_id, None)  # reset fail counter
             log.info(
-                "<<< [%s] SELL order placed: %s @ $%.2f sz=%d  "
-                "(will check fill in %.0fs)",
-                slot_id, oid[:16], sell_price, entry.size, MIN_ORDER_LIFETIME_S,
+                "<<< [%s] STATE: POSITION_CONFIRM -> EXIT_WAIT_FILL "
+                "SELL %s @ $%.2f sz=%d (check in %.0fs)",
+                slot_id, oid[:16], sell_price, entry.size, EXIT_CHECK_INTERVAL_S,
             )
         else:
             # Track consecutive failures -- retry every 30s until market expires
@@ -725,7 +770,7 @@ class LiveTrader:
 
         # Check if SELL order is old enough to check
         age = time.time() - exit_order.created_at
-        if age < MIN_ORDER_LIFETIME_S:
+        if age < EXIT_CHECK_INTERVAL_S:
             return "holding"
 
         # --- Non-destructive check: GET order status ---
@@ -852,7 +897,8 @@ class LiveTrader:
 
         now_iso = time.strftime("%H:%M:%S", time.gmtime())
         log.info(
-            "+++ [%s] SELL FILLED! %s sold=%d entry=$%.2f sell=$%.2f pnl=$%+.4f  "
+            "+++ [%s] STATE: EXIT_WAIT_FILL -> TRADE_COMPLETE "
+            "%s sold=%d entry=$%.2f sell=$%.2f pnl=$%+.4f  "
             "residual=%d  [session: %d trades, %.0f%% WR, $%+.2f]",
             slot_id, exit_order.side, sold_size,
             exit_order.entry_price, exit_order.sell_price, pnl,
@@ -900,6 +946,10 @@ class LiveTrader:
         tick_idx: int,
     ) -> None:
         """Place entry BUY order on exchange."""
+        log.info(
+            ">>> [%s] STATE: IDLE -> ENTRY_PLACING (%s @ $%.2f sz=%d)",
+            slot_id, side, price, size,
+        )
         oid = await self._poly.place_limit_buy(token_id, price, size)
         if oid:
             self._entry_orders[slot_id] = TrackedEntry(
@@ -913,8 +963,8 @@ class LiveTrader:
             )
             self._orders_placed += 1
             log.info(
-                ">>> [%s] Entry order placed: %s @ $%.2f sz=%d  "
-                "(will check fill in %.0fs)",
+                ">>> [%s] STATE: ENTRY_PLACING -> ENTRY_WAIT_FILL "
+                "%s @ $%.2f sz=%d (check in %.0fs)",
                 slot_id, oid[:16], price, size, MIN_ORDER_LIFETIME_S,
             )
         else:
