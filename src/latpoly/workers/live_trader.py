@@ -421,41 +421,17 @@ class LiveTrader:
             if time.time() < retry_after:
                 return Signal(action="NONE", side="", reason="sell_backoff")
 
-            # Give up after too many failures (hold to settlement)
+            # Never give up -- keep retrying every 30s until market expires
+            # (on rotation, handle_rotation will count the loss)
             fails = self._sell_fail_count.get(slot_id, 0)
-            if fails >= 5:
-                filled = self._filled_positions[slot_id]
-                # Count as LOSS: assume shares expire worthless (worst case)
-                loss = filled.price * filled.size
-                self._session_trades += 1
-                self._session_pnl -= loss
-                self._slot_trades[slot_id] = self._slot_trades.get(slot_id, 0) + 1
-                self._slot_pnl[slot_id] = self._slot_pnl.get(slot_id, 0.0) - loss
-                wr = (
-                    self._session_wins / self._session_trades * 100
-                    if self._session_trades else 0
-                )
-                log.warning(
-                    "!!! [%s] SELL failed %d times -- giving up, hold to expiry. "
-                    "LOSS=$-%.2f (%s @ $%.2f × %d)  [session: %d trades, %.0f%% WR, $%+.2f]",
-                    slot_id, fails, loss, filled.side, filled.price, filled.size,
-                    self._session_trades, wr, self._session_pnl,
-                )
-                # Remove from filled_positions AND residual to stop retrying
-                # (must clear both to avoid double-counting loss)
-                self._filled_positions.pop(slot_id, None)
-                self._residual.pop(slot_id, None)
-                self._sell_fail_count.pop(slot_id, None)
-                self._sell_retry_after.pop(slot_id, None)
-                self._engines[slot_id] = StrategyEngine(self.strat_cfg)
-                return Signal(action="NONE", side="", reason="sell_gave_up")
 
             filled = self._filled_positions[slot_id]
             log.warning(
-                "!!! [%s] Filled position without SELL order -- re-placing (attempt #%d)",
+                "!!! [%s] Filled position without SELL order -- re-placing "
+                "(attempt #%d, retrying every 30s until expiry)",
                 slot_id, fails + 1,
             )
-            # Wait 5s for on-chain settlement before SELL retry
+            # Wait for on-chain settlement before SELL retry
             await asyncio.sleep(5.0)
             await self._place_exit_order(slot_id, filled, state)
             return Signal(action="NONE", side="", reason="sell_replaced")
@@ -616,15 +592,14 @@ class LiveTrader:
                 slot_id, oid[:16], sell_price, entry.size, MIN_ORDER_LIFETIME_S,
             )
         else:
-            # Track consecutive failures and apply backoff
+            # Track consecutive failures -- retry every 30s until market expires
             fails = self._sell_fail_count.get(slot_id, 0) + 1
             self._sell_fail_count[slot_id] = fails
-            # Exponential backoff: 5s, 10s, 20s, 30s max
-            backoff = min(30.0, 5.0 * (2 ** (fails - 1)))
+            backoff = 30.0  # fixed 30s between retries
             self._sell_retry_after[slot_id] = time.time() + backoff
             log.warning(
                 "!!! [%s] SELL order FAILED to place (attempt #%d) "
-                "-- retry in %.0fs, else hold to expiry",
+                "-- retry in %.0fs (will keep trying until expiry)",
                 slot_id, fails, backoff,
             )
 
