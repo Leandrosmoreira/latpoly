@@ -567,27 +567,36 @@ class LiveTrader:
 
         # Check on-chain token balance before SELL
         balance = await self._poly.get_token_balance(entry.token_id)
-        if balance < entry.size:
+        if balance <= 0:
             log.warning(
-                "<<< [%s] SELL skipped: on-chain balance=%d < needed=%d "
-                "(tokens not settled yet). Will retry.",
-                slot_id, balance, entry.size,
+                "<<< [%s] SELL skipped: on-chain balance=0 "
+                "(tokens not settled yet). Will retry in 30s.",
+                slot_id,
             )
-            # Trigger retry via fail counter (don't place order yet)
             fails = self._sell_fail_count.get(slot_id, 0) + 1
             self._sell_fail_count[slot_id] = fails
             self._sell_retry_after[slot_id] = time.time() + 30.0
             return
 
+        # Use ACTUAL on-chain balance instead of assumed fill size
+        # (BUY may have partially filled, e.g. 4.93 instead of 5)
+        sell_size = min(entry.size, balance)
+        if sell_size < self.strat_cfg.min_maker_size:
+            log.warning(
+                "<<< [%s] SELL skipped: balance=%d < min_maker=%d. Hold to expiry.",
+                slot_id, sell_size, self.strat_cfg.min_maker_size,
+            )
+            return
+
         log.info(
             "<<< [%s] Placing SELL: %s @ $%.2f (entry=$%.2f + %d ticks) sz=%d "
-            "(balance=%d confirmed)",
-            slot_id, entry.side, sell_price, entry.price, exit_ticks, entry.size,
+            "(balance=%d on-chain)",
+            slot_id, entry.side, sell_price, entry.price, exit_ticks, sell_size,
             balance,
         )
 
         oid = await self._poly.place_limit_sell(
-            entry.token_id, sell_price, entry.size,
+            entry.token_id, sell_price, sell_size,
         )
 
         if oid:
@@ -598,7 +607,7 @@ class LiveTrader:
                 side=entry.side,
                 entry_price=entry.price,
                 sell_price=sell_price,
-                size=entry.size,
+                size=sell_size,
             )
             self._sells_placed += 1
             self._sell_fail_count.pop(slot_id, None)  # reset fail counter
