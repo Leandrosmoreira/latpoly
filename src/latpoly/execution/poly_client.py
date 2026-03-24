@@ -128,6 +128,40 @@ class PolyClient:
         return self._client is not None
 
     # ------------------------------------------------------------------
+    # Token balance check
+    # ------------------------------------------------------------------
+
+    async def get_token_balance(self, token_id: str) -> int:
+        """Check how many conditional tokens are in the wallet on-chain.
+
+        Returns the number of shares held, or 0 on failure.
+        Uses the /balance-allowance endpoint.
+        """
+        if not self._client:
+            return 0
+        try:
+            params = BalanceAllowanceParams(
+                asset_type=AssetType.CONDITIONAL,
+                token_id=token_id,
+            )
+            result = await asyncio.to_thread(
+                self._client.get_balance_allowance, params
+            )
+            if isinstance(result, dict):
+                # Parse balance from response (Wei units for ERC1155)
+                raw = result.get("balance", 0)
+                balance = int(float(str(raw))) if raw else 0
+                log.debug(
+                    "Token balance for %s...: %d (raw=%s)",
+                    token_id[:16], balance, result,
+                )
+                return balance
+            return 0
+        except Exception as e:
+            log.debug("get_token_balance failed for %s...: %s", token_id[:16], e)
+            return 0
+
+    # ------------------------------------------------------------------
     # Token approval (required before SELL)
     # ------------------------------------------------------------------
 

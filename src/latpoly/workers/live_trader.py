@@ -565,9 +565,25 @@ class LiveTrader:
         # Clamp sell_price to valid range (0.01 - 0.99)
         sell_price = max(0.01, min(0.99, sell_price))
 
+        # Check on-chain token balance before SELL
+        balance = await self._poly.get_token_balance(entry.token_id)
+        if balance < entry.size:
+            log.warning(
+                "<<< [%s] SELL skipped: on-chain balance=%d < needed=%d "
+                "(tokens not settled yet). Will retry.",
+                slot_id, balance, entry.size,
+            )
+            # Trigger retry via fail counter (don't place order yet)
+            fails = self._sell_fail_count.get(slot_id, 0) + 1
+            self._sell_fail_count[slot_id] = fails
+            self._sell_retry_after[slot_id] = time.time() + 30.0
+            return
+
         log.info(
-            "<<< [%s] Placing SELL: %s @ $%.2f (entry=$%.2f + %d ticks) sz=%d",
+            "<<< [%s] Placing SELL: %s @ $%.2f (entry=$%.2f + %d ticks) sz=%d "
+            "(balance=%d confirmed)",
             slot_id, entry.side, sell_price, entry.price, exit_ticks, entry.size,
+            balance,
         )
 
         oid = await self._poly.place_limit_sell(
