@@ -681,12 +681,9 @@ class LiveTrader:
 
         # Use ACTUAL on-chain balance instead of assumed fill size
         sell_size = min(entry.size, balance)
-        # For SELL, accept any balance >= 1 (min_maker only applies to BUY)
-        # Polymarket accepts SELL if notional (price × size) >= ~$0.50
         if sell_size < 1:
             log.warning(
-                "<<< [%s] SELL skipped: balance=%d < 1 after 5 attempts. "
-                "Will retry in 15s.",
+                "<<< [%s] SELL skipped: balance=%d < 1. Will retry in 15s.",
                 slot_id, sell_size,
             )
             fails = self._sell_fail_count.get(slot_id, 0) + 1
@@ -694,34 +691,82 @@ class LiveTrader:
             self._sell_retry_after[slot_id] = time.time() + 15.0
             return
 
-        log.info(
-            "<<< [%s] Placing SELL: %s @ $%.2f (entry=$%.2f + %d ticks) sz=%d "
-            "(balance=%d on-chain)",
-            slot_id, entry.side, sell_price, entry.price, exit_ticks, sell_size,
-            balance,
-        )
+        # Strategy 2: if balance < min_maker, sell TAKER (FOK) at best bid
+        use_taker = sell_size < self.strat_cfg.min_maker_size
+        if use_taker:
+            # Taker sell at best_bid (immediate execution)
+            pm = state.get_polymarket(slot_id)
+            if entry.side == "YES":
+                taker_price = pm.yes_best_bid or sell_price
+            else:
+                taker_price = pm.no_best_bid or sell_price
+            taker_price = round(taker_price, 2)
 
-        oid = await self._poly.place_limit_sell(
-            entry.token_id, sell_price, sell_size,
-        )
+            log.info(
+                "<<< [%s] Placing SELL TAKER (FOK): %s @ $%.2f sz=%d "
+                "(balance=%d < min_maker=%d, entry=$%.2f)",
+                slot_id, entry.side, taker_price, sell_size,
+                balance, self.strat_cfg.min_maker_size, entry.price,
+            )
+            oid = await self._poly.place_market_sell(
+                entry.token_id, taker_price, sell_size,
+            )
+        else:
+            log.info(
+                "<<< [%s] Placing SELL MAKER: %s @ $%.2f (entry=$%.2f + %d ticks) sz=%d "
+                "(balance=%d on-chain)",
+                slot_id, entry.side, sell_price, entry.price, exit_ticks, sell_size,
+                balance,
+            )
+            oid = await self._poly.place_limit_sell(
+                entry.token_id, sell_price, sell_size,
+            )
+
+        actual_sell_price = taker_price if use_taker else sell_price
 
         if oid:
-            self._exit_orders[slot_id] = TrackedExit(
-                order_id=oid,
-                slot_id=slot_id,
-                token_id=entry.token_id,
-                side=entry.side,
-                entry_price=entry.price,
-                sell_price=sell_price,
-                size=sell_size,
-            )
-            self._sells_placed += 1
-            self._sell_fail_count.pop(slot_id, None)  # reset fail counter
-            log.info(
-                "<<< [%s] STATE: POSITION_CONFIRM -> EXIT_WAIT_FILL "
-                "SELL %s @ $%.2f sz=%d (check in %.0fs)",
-                slot_id, oid[:16], sell_price, entry.size, EXIT_CHECK_INTERVAL_S,
-            )
+            if use_taker:
+                # FOK taker = immediate fill, record directly
+                pnl = (taker_price - entry.price) * sell_size
+                self._sells_placed += 1
+                self._sells_filled += 1
+                self._session_trades += 1
+                self._session_pnl += pnl
+                if pnl > 0:
+                    self._session_wins += 1
+                self._sell_fail_count.pop(slot_id, None)
+                self._filled_positions.pop(slot_id, None)
+                self._residual.pop(slot_id, None)
+
+                engine = self._engines.get(slot_id)
+                if engine is not None:
+                    engine.notify_trade_result(pnl)
+                    if getattr(engine, "_status", None) == "DONE":
+                        await self._handle_cycle_done(slot_id)
+
+                self._new_engine(slot_id)
+                log.info(
+                    "+++ [%s] SELL TAKER FILLED! %s sz=%d entry=$%.2f sell=$%.2f "
+                    "pnl=$%+.4f",
+                    slot_id, entry.side, sell_size, entry.price, taker_price, pnl,
+                )
+            else:
+                self._exit_orders[slot_id] = TrackedExit(
+                    order_id=oid,
+                    slot_id=slot_id,
+                    token_id=entry.token_id,
+                    side=entry.side,
+                    entry_price=entry.price,
+                    sell_price=sell_price,
+                    size=sell_size,
+                )
+                self._sells_placed += 1
+                self._sell_fail_count.pop(slot_id, None)
+                log.info(
+                    "<<< [%s] STATE: POSITION_CONFIRM -> EXIT_WAIT_FILL "
+                    "SELL %s @ $%.2f sz=%d (check in %.0fs)",
+                    slot_id, oid[:16], sell_price, sell_size, EXIT_CHECK_INTERVAL_S,
+                )
         else:
             # Track consecutive failures -- retry every 30s until market expires
             fails = self._sell_fail_count.get(slot_id, 0) + 1

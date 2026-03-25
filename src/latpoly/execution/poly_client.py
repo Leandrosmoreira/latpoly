@@ -305,6 +305,45 @@ class PolyClient:
             log.error("SELL retry failed: px=%.2f sz=%d error=%s", price, size, e)
             return None
 
+    async def place_market_sell(
+        self, token_id: str, price: float, size: int,
+    ) -> Optional[str]:
+        """Place FOK (Fill-Or-Kill) taker SELL — executes immediately at market."""
+        if not self._client:
+            return None
+
+        await self.approve_token(token_id)
+
+        try:
+            args = OrderArgs(
+                price=price,
+                size=size,
+                side=SELL,
+                token_id=token_id,
+            )
+            signed = await asyncio.to_thread(self._client.create_order, args)
+            resp = await asyncio.to_thread(
+                self._client.post_order, signed, OrderType.FOK
+            )
+
+            if resp and resp.get("success"):
+                oid = resp.get("orderID", resp.get("order_id", ""))
+                log.info(
+                    "SELL TAKER (FOK) placed: %s @ $%.2f sz=%d token=%s...",
+                    oid[:16], price, size, token_id[:16],
+                )
+                return oid
+
+            log.warning("SELL TAKER rejected: %s", resp)
+            return None
+
+        except Exception as e:
+            log.error(
+                "SELL TAKER exception: px=%.2f sz=%d token=%s... error=%s",
+                price, size, token_id[:16], e,
+            )
+            return None
+
     # ------------------------------------------------------------------
     # Order cancellation
     # ------------------------------------------------------------------
