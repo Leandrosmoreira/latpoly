@@ -13,6 +13,7 @@ from __future__ import annotations
 from latpoly.strategy.base import BaseStrategy
 from latpoly.strategy.engine import StrategyEngine
 from latpoly.strategy.strategy_2 import CycleTP10Engine
+from latpoly.strategy.strategy_3 import Strategy3Engine
 
 # Register all available strategies here.
 # To add a new strategy:
@@ -22,6 +23,7 @@ from latpoly.strategy.strategy_2 import CycleTP10Engine
 STRATEGIES: dict[str, type[BaseStrategy]] = {
     "scalp": StrategyEngine,
     "cycle_tp10": CycleTP10Engine,
+    "strategy_3": Strategy3Engine,
 }
 
 
