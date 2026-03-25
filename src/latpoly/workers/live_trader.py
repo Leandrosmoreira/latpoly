@@ -654,24 +654,23 @@ class LiveTrader:
         # Clamp sell_price to valid range (0.01 - 0.99)
         sell_price = max(0.01, min(0.99, sell_price))
 
-        # Check on-chain token balance before SELL (retry up to 5 times)
+        # Check on-chain token balance before SELL (retry up to 3 times)
         balance = 0
-        for attempt in range(5):
+        for attempt in range(3):
             balance = await self._poly.get_token_balance(entry.token_id)
-            if balance >= self.strat_cfg.min_maker_size:
+            if balance >= 1:
                 break
-            wait = 2.0 if attempt < 4 else 0
-            if wait:
+            if attempt < 2:
                 log.info(
-                    "<<< [%s] Balance=%d < min_maker=%d (attempt %d/5) "
+                    "<<< [%s] Balance=%d (attempt %d/3) "
                     "-- waiting 2s for settlement...",
-                    slot_id, balance, self.strat_cfg.min_maker_size, attempt + 1,
+                    slot_id, balance, attempt + 1,
                 )
                 await asyncio.sleep(2.0)
 
         if balance <= 0:
             log.warning(
-                "<<< [%s] SELL skipped: on-chain balance=0 after 5 attempts "
+                "<<< [%s] SELL skipped: on-chain balance=0 after 3 attempts "
                 "(tokens not settled). Will retry in 30s.",
                 slot_id,
             )
@@ -682,11 +681,13 @@ class LiveTrader:
 
         # Use ACTUAL on-chain balance instead of assumed fill size
         sell_size = min(entry.size, balance)
-        if sell_size < self.strat_cfg.min_maker_size:
+        # For SELL, accept any balance >= 1 (min_maker only applies to BUY)
+        # Polymarket accepts SELL if notional (price × size) >= ~$0.50
+        if sell_size < 1:
             log.warning(
-                "<<< [%s] SELL skipped: balance=%d < min_maker=%d after 5 attempts. "
+                "<<< [%s] SELL skipped: balance=%d < 1 after 5 attempts. "
                 "Will retry in 15s.",
-                slot_id, sell_size, self.strat_cfg.min_maker_size,
+                slot_id, sell_size,
             )
             fails = self._sell_fail_count.get(slot_id, 0) + 1
             self._sell_fail_count[slot_id] = fails
