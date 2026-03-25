@@ -2,7 +2,8 @@
 
 Uses the same Binance lag signal as the scalp strategy, but allows multiple
 sequential trades per market cycle.  Stops completely when cumulative realized
-PnL for the cycle hits +10% of base notional.  Resets on market rotation.
+PnL for the cycle hits +10% of 1 lot notional (5 * $0.50 * 10% = $0.25).
+Resets on market rotation.
 
 State machine:
   WORKING  — accepting signals, placing entries/exits
@@ -12,7 +13,7 @@ Config (env vars):
   LATPOLY_S2_ORDER_SIZE       = 5       (shares per order)
   LATPOLY_S2_PROFIT_TICKS     = 2       (exit = entry + N ticks)
   LATPOLY_S2_CYCLE_BASE_PRICE = 0.50    (notional reference price)
-  LATPOLY_S2_CYCLE_TARGET_PCT = 0.10    (10% of base notional)
+  LATPOLY_S2_CYCLE_TARGET_PCT = 0.10    (10% of lot notional = $0.25 default)
   LATPOLY_S2_MAX_POSITION     = 15      (max shares held at once)
   LATPOLY_S2_MIN_TTX          = 120     (no new entries within Ns of expiry)
 """
@@ -59,7 +60,7 @@ class CycleTP10Engine(BaseStrategy):
         self._max_position = _env_int("LATPOLY_S2_MAX_POSITION", 15)
         self._min_ttx = _env_float("LATPOLY_S2_MIN_TTX", 120.0)
 
-        # Derived
+        # Derived: 10% of 1 lot notional (5 * $0.50 * 10% = $0.25)
         self._cycle_base_notional = self._order_size * self._cycle_base_price
         self._cycle_target_pnl = self._cycle_base_notional * self._cycle_target_pct
 
