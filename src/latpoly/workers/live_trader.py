@@ -206,6 +206,34 @@ class LiveTrader:
             _cls = get_strategy(self._strategy_name)
             self._engines[slot_id] = _cls(self.strat_cfg)
 
+    async def _handle_cycle_done(self, slot_id: str) -> None:
+        """Cycle target hit — cancel all open orders and clear tracking."""
+        log.info(
+            "$$$ [%s] CYCLE DONE — cancelling all open orders for slot",
+            slot_id,
+        )
+        # Cancel pending entry
+        entry = self._entry_orders.pop(slot_id, None)
+        if entry:
+            await self._poly.cancel_order(entry.order_id)
+            log.info("$$$ [%s] Cancelled entry order %s", slot_id, entry.order_id[:16])
+
+        # Cancel pending exit (SELL)
+        exit_order = self._exit_orders.pop(slot_id, None)
+        if exit_order:
+            await self._poly.cancel_order(exit_order.order_id)
+            log.info("$$$ [%s] Cancelled exit order %s", slot_id, exit_order.order_id[:16])
+
+        # Clear position tracking (tokens auto-settle at expiry)
+        self._filled_positions.pop(slot_id, None)
+        self._residual.pop(slot_id, None)
+        self._sell_fail_count.pop(slot_id, None)
+        self._sell_retry_after.pop(slot_id, None)
+
+        # Cancel ALL orders on exchange as safety net
+        await self._poly.cancel_all()
+        log.info("$$$ [%s] All exchange orders cancelled. Waiting for next market.", slot_id)
+
     # ------------------------------------------------------------------
     # Lot management
     # ------------------------------------------------------------------
@@ -645,11 +673,12 @@ class LiveTrader:
         if sell_size < self.strat_cfg.min_maker_size:
             log.warning(
                 "<<< [%s] SELL skipped: balance=%d < min_maker=%d. "
-                "Clearing position -- will auto-settle at expiry.",
+                "Holding to expiry (won't retry).",
                 slot_id, sell_size, self.strat_cfg.min_maker_size,
             )
-            # Clear filled position to stop orphan retry loop
-            self._filled_positions.pop(slot_id, None)
+            # Mark as "hold to expiry" — stop retry but keep tracking
+            self._sell_fail_count[slot_id] = 9999
+            self._sell_retry_after[slot_id] = float("inf")
             return
 
         log.info(
@@ -816,7 +845,12 @@ class LiveTrader:
         if size_matched >= exit_order.size or order_status == "matched":
             # FULL FILL
             sold_size = max(size_matched, exit_order.size)
-            return self._record_sell_fill(slot_id, exit_order, sold_size)
+            result = self._record_sell_fill(slot_id, exit_order, sold_size)
+            # Check if cycle target was hit → clean up
+            engine = self._engines.get(slot_id)
+            if engine is not None and getattr(engine, "_status", None) == "DONE":
+                await self._handle_cycle_done(slot_id)
+            return result
 
         elif size_matched > 0:
             log.info(
@@ -1023,6 +1057,8 @@ class LiveTrader:
                 engine = self._engines.get(slot_id)
                 if engine is not None:
                     engine.notify_trade_result(pnl)
+                    if getattr(engine, "_status", None) == "DONE":
+                        await self._handle_cycle_done(slot_id)
                 log.info(
                     "+++ [%s] SELL filled during rotation! pnl=$%+.4f",
                     slot_id, pnl,
