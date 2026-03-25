@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from latpoly.strategy.config import StrategyConfig
+from latpoly.strategy.base import BaseStrategy
 
 
 # ---------------------------------------------------------------------------
@@ -65,7 +66,7 @@ _NONE_SIGNAL = Signal(action="NONE", side="", reason="no action")
 # ---------------------------------------------------------------------------
 
 
-class StrategyEngine:
+class StrategyEngine(BaseStrategy):
     """Stateful strategy engine. Feed ticks via on_tick(), get Signals back.
 
     Supports multiple concurrent positions (up to max_concurrent_positions).

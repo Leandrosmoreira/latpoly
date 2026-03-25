@@ -17,7 +17,8 @@ from typing import IO, Optional
 from latpoly.config import Config
 from latpoly.shared_state import SharedState
 from latpoly.strategy.config import StrategyConfig
-from latpoly.strategy.engine import StrategyEngine, Signal
+from latpoly.strategy.engine import StrategyEngine, Signal  # noqa: F401
+from latpoly.strategy.registry import get_strategy
 
 log = logging.getLogger(__name__)
 
@@ -28,8 +29,9 @@ class PaperTrader:
     def __init__(self, strat_cfg: StrategyConfig, slot_ids: list[str],
                  output_dir: str = "data/paper") -> None:
         self.strat_cfg = strat_cfg
+        _engine_cls = get_strategy(os.environ.get("LATPOLY_STRATEGY", "scalp"))
         self._engines: dict[str, StrategyEngine] = {
-            sid: StrategyEngine(strat_cfg) for sid in slot_ids
+            sid: _engine_cls(strat_cfg) for sid in slot_ids
         }
         self._tick_idx: dict[str, int] = {sid: 0 for sid in slot_ids}
         self._output_dir = Path(output_dir)

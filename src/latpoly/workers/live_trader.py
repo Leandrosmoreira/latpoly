@@ -42,7 +42,8 @@ from latpoly.config import Config
 from latpoly.execution.poly_client import PolyClient
 from latpoly.shared_state import SharedState
 from latpoly.strategy.config import StrategyConfig
-from latpoly.strategy.engine import Signal, StrategyEngine
+from latpoly.strategy.engine import Signal, StrategyEngine  # noqa: F401 — Signal used everywhere
+from latpoly.strategy.registry import get_strategy
 
 log = logging.getLogger(__name__)
 
@@ -141,8 +142,10 @@ class LiveTrader:
         output_dir: str = "data/live",
     ) -> None:
         self.strat_cfg = strat_cfg
+        self._strategy_name = os.environ.get("LATPOLY_STRATEGY", "scalp")
+        _engine_cls = get_strategy(self._strategy_name)
         self._engines: dict[str, StrategyEngine] = {
-            sid: StrategyEngine(strat_cfg) for sid in slot_ids
+            sid: _engine_cls(strat_cfg) for sid in slot_ids
         }
         self._tick_idx: dict[str, int] = {sid: 0 for sid in slot_ids}
         self._poly = poly
@@ -189,6 +192,19 @@ class LiveTrader:
         # When a SELL partially fills, leftover shares are tracked here.
         # Next BUY adjusts size to complete a full lot (multiple of min_maker_size).
         self._residual: dict[str, dict] = {}
+
+    # ------------------------------------------------------------------
+    # Engine lifecycle
+    # ------------------------------------------------------------------
+
+    def _new_engine(self, slot_id: str) -> None:
+        """Reset engine for next trade, preserving cycle state if strategy needs it."""
+        engine = self._engines.get(slot_id)
+        if engine is not None:
+            engine.reset_trade()
+        else:
+            _cls = get_strategy(self._strategy_name)
+            self._engines[slot_id] = _cls(self.strat_cfg)
 
     # ------------------------------------------------------------------
     # Lot management
@@ -337,7 +353,7 @@ class LiveTrader:
                         "Resetting engine.",
                         slot_id, result,
                     )
-                    self._engines[slot_id] = StrategyEngine(self.strat_cfg)
+                    self._new_engine(slot_id)
                     return Signal(action="NONE", side="", reason="entry_unconfirmed")
 
             if result in ("matched", "gone", "failed") and (
@@ -409,7 +425,7 @@ class LiveTrader:
                         slot_id, total, min_lot,
                     )
                     # Reset engine to allow next entry
-                    self._engines[slot_id] = StrategyEngine(self.strat_cfg)
+                    self._new_engine(slot_id)
                     # Don't clear filled_positions -- keep tracking
                     # But allow engine to generate new BUY signal
                     self._filled_positions.pop(slot_id, None)
@@ -456,7 +472,7 @@ class LiveTrader:
                     "(not filled after %.1fs, %d reprices). Resetting engine.",
                     slot_id, age, pending.reprice_count,
                 )
-                self._engines[slot_id] = StrategyEngine(self.strat_cfg)
+                self._new_engine(slot_id)
                 return Signal(action="NONE", side="", reason="entry_cancelled")
 
         # -- PHASE 2: If we have a filled position with no SELL, skip engine
@@ -930,8 +946,13 @@ class LiveTrader:
         self._exit_orders.pop(slot_id, None)
         self._filled_positions.pop(slot_id, None)
 
+        # Notify engine of trade result (for cycle PnL tracking in strategy 2+)
+        engine = self._engines.get(slot_id)
+        if engine is not None:
+            engine.notify_trade_result(pnl)
+
         # Reset engine -- ready for next trade on this slot
-        self._engines[slot_id] = StrategyEngine(self.strat_cfg)
+        self._new_engine(slot_id)
 
         return "filled"
 
@@ -999,6 +1020,9 @@ class LiveTrader:
                 self._session_pnl += pnl
                 if pnl > 0:
                     self._session_wins += 1
+                engine = self._engines.get(slot_id)
+                if engine is not None:
+                    engine.notify_trade_result(pnl)
                 log.info(
                     "+++ [%s] SELL filled during rotation! pnl=$%+.4f",
                     slot_id, pnl,
@@ -1052,7 +1076,7 @@ class LiveTrader:
             )
 
         # Reset engine for this slot
-        self._engines[slot_id] = StrategyEngine(self.strat_cfg)
+        self._new_engine(slot_id)
 
     # ------------------------------------------------------------------
     # Recover orphan positions on startup / rotation
@@ -1257,10 +1281,12 @@ async def live_trader_worker(
     exit_ticks = strat_cfg.fixed_exit_ticks
     exit_mode = f"scalp +{exit_ticks} ticks ($+{exit_ticks * 0.01:.2f})" if exit_ticks > 0 else "hold-to-expiry"
 
+    strategy_name = os.environ.get("LATPOLY_STRATEGY", "scalp")
     log.info(
-        "Live trader starting: %d BTC slots [%s]  bankroll=$%.0f  size=%.0f  "
-        "max_concurrent=%d  max_exposure=%.0f%%  order_lifetime=%.0fs  "
-        "exit=%s  expiry_cancel=%.0fs",
+        "Live trader starting: strategy=%s  %d BTC slots [%s]  bankroll=$%.0f  "
+        "size=%.0f  max_concurrent=%d  max_exposure=%.0f%%  "
+        "order_lifetime=%.0fs  exit=%s  expiry_cancel=%.0fs",
+        strategy_name,
         len(slot_ids), ", ".join(slot_ids),
         strat_cfg.initial_bankroll,
         strat_cfg.base_size_contracts,
