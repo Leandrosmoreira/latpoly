@@ -439,10 +439,10 @@ class LiveTrader:
                     # Enough for maker SELL -- place exit order
                     log.info(
                         ">>> [%s] STATE: ENTRY_FILLED -> POST_ENTRY_SETTLEMENT "
-                        "(waiting 3s for on-chain settlement)",
+                        "(waiting 5s for on-chain settlement)",
                         slot_id,
                     )
-                    await asyncio.sleep(3.0)
+                    await asyncio.sleep(5.0)
                     await self._place_exit_order(slot_id, pending, state)
                     return Signal(action="NONE", side="", reason="entry_filled_sell_placed")
                 else:
@@ -654,12 +654,25 @@ class LiveTrader:
         # Clamp sell_price to valid range (0.01 - 0.99)
         sell_price = max(0.01, min(0.99, sell_price))
 
-        # Check on-chain token balance before SELL
-        balance = await self._poly.get_token_balance(entry.token_id)
+        # Check on-chain token balance before SELL (retry up to 5 times)
+        balance = 0
+        for attempt in range(5):
+            balance = await self._poly.get_token_balance(entry.token_id)
+            if balance >= self.strat_cfg.min_maker_size:
+                break
+            wait = 2.0 if attempt < 4 else 0
+            if wait:
+                log.info(
+                    "<<< [%s] Balance=%d < min_maker=%d (attempt %d/5) "
+                    "-- waiting 2s for settlement...",
+                    slot_id, balance, self.strat_cfg.min_maker_size, attempt + 1,
+                )
+                await asyncio.sleep(2.0)
+
         if balance <= 0:
             log.warning(
-                "<<< [%s] SELL skipped: on-chain balance=0 "
-                "(tokens not settled yet). Will retry in 30s.",
+                "<<< [%s] SELL skipped: on-chain balance=0 after 5 attempts "
+                "(tokens not settled). Will retry in 30s.",
                 slot_id,
             )
             fails = self._sell_fail_count.get(slot_id, 0) + 1
@@ -668,17 +681,16 @@ class LiveTrader:
             return
 
         # Use ACTUAL on-chain balance instead of assumed fill size
-        # (BUY may have partially filled, e.g. 4.93 instead of 5)
         sell_size = min(entry.size, balance)
         if sell_size < self.strat_cfg.min_maker_size:
             log.warning(
-                "<<< [%s] SELL skipped: balance=%d < min_maker=%d. "
-                "Holding to expiry (won't retry).",
+                "<<< [%s] SELL skipped: balance=%d < min_maker=%d after 5 attempts. "
+                "Will retry in 15s.",
                 slot_id, sell_size, self.strat_cfg.min_maker_size,
             )
-            # Mark as "hold to expiry" — stop retry but keep tracking
-            self._sell_fail_count[slot_id] = 9999
-            self._sell_retry_after[slot_id] = float("inf")
+            fails = self._sell_fail_count.get(slot_id, 0) + 1
+            self._sell_fail_count[slot_id] = fails
+            self._sell_retry_after[slot_id] = time.time() + 15.0
             return
 
         log.info(
