@@ -925,10 +925,11 @@ class LiveTrader:
             sold_size = max(size_matched, exit_order.size)
             result = self._record_sell_fill(slot_id, exit_order, sold_size)
 
-            # Sell residual shares as taker (buy 6, settle 5, sell 5 → 1 left)
+            # Sell any residual shares as taker
+            # (e.g. bought 6, on-chain settled 5, sold 5 → 1 residual)
             await self._sell_residual_taker(
                 slot_id, exit_order.token_id, exit_order.side,
-                exit_order.entry_price, exit_order.sell_price, tick,
+                exit_order.entry_price, exit_order.sell_price,
             )
 
             # Check if cycle target was hit → clean up
@@ -1004,47 +1005,51 @@ class LiveTrader:
         side: str,
         entry_price: float,
         sell_price: float,
-        tick: dict,
     ) -> None:
         """After maker sell, check for leftover shares and sell them as taker.
 
         Typical case: bought 6, on-chain settled 5, sold 5 maker → 1 left.
-        Sell that 1 share as taker (FOK) at best_bid if profitable.
+        Sell that residual as taker (FOK) at sell_price (already profitable).
         """
-        await asyncio.sleep(1.0)  # brief wait for settlement
+        # Wait for on-chain settlement of the maker sell to clear
+        await asyncio.sleep(3.0)
+
         residual_balance = await self._poly.get_token_balance(token_id)
         if residual_balance < 1:
+            log.info(
+                "<<< [%s] No residual shares on-chain after sell, clean exit",
+                slot_id,
+            )
             return
 
-        prefix = "yes" if side == "YES" else "no"
-        best_bid = tick.get(f"pm_{prefix}_best_bid") or 0.0
-        best_bid = round(best_bid, 2)
-
-        if best_bid <= 0:
-            log.info(
-                "<<< [%s] Residual %d shares but no best_bid, skipping taker sell",
+        # Cap residual to max 3 shares (safety: avoid selling unrelated tokens)
+        if residual_balance > 3:
+            log.warning(
+                "!!! [%s] Residual balance=%d too high (expected ≤3), "
+                "skipping taker sell to avoid mistakes",
                 slot_id, residual_balance,
             )
             return
 
-        # Sell residual at best_bid regardless of profit — these are leftover
-        # shares from the buy/sell size mismatch, already accounted for in PnL
+        # Use the sell_price from the successful maker sell (we know it's profitable)
+        taker_price = sell_price
+
         log.info(
             "<<< [%s] RESIDUAL TAKER SELL: %s sz=%d @ $%.2f "
             "(entry=$%.2f, main_sell=$%.2f)",
-            slot_id, side, residual_balance, best_bid,
+            slot_id, side, residual_balance, taker_price,
             entry_price, sell_price,
         )
         oid = await self._poly.place_market_sell(
-            token_id, best_bid, residual_balance,
+            token_id, taker_price, residual_balance,
         )
         if oid:
-            residual_pnl = (best_bid - entry_price) * residual_balance
+            residual_pnl = (taker_price - entry_price) * residual_balance
             self._session_pnl += residual_pnl
             self._residual.pop(slot_id, None)
             log.info(
                 "+++ [%s] RESIDUAL SOLD! %s sz=%d @ $%.2f pnl=$%+.4f",
-                slot_id, side, residual_balance, best_bid, residual_pnl,
+                slot_id, side, residual_balance, taker_price, residual_pnl,
             )
         else:
             log.warning(
