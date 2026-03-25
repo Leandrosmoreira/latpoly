@@ -628,9 +628,12 @@ class LiveTrader:
         sell_size = min(entry.size, balance)
         if sell_size < self.strat_cfg.min_maker_size:
             log.warning(
-                "<<< [%s] SELL skipped: balance=%d < min_maker=%d. Hold to expiry.",
+                "<<< [%s] SELL skipped: balance=%d < min_maker=%d. "
+                "Clearing position -- will auto-settle at expiry.",
                 slot_id, sell_size, self.strat_cfg.min_maker_size,
             )
+            # Clear filled position to stop orphan retry loop
+            self._filled_positions.pop(slot_id, None)
             return
 
         log.info(
