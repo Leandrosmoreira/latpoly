@@ -924,6 +924,13 @@ class LiveTrader:
             # FULL FILL
             sold_size = max(size_matched, exit_order.size)
             result = self._record_sell_fill(slot_id, exit_order, sold_size)
+
+            # Sell residual shares as taker (buy 6, settle 5, sell 5 → 1 left)
+            await self._sell_residual_taker(
+                slot_id, exit_order.token_id, exit_order.side,
+                exit_order.entry_price, exit_order.sell_price, tick,
+            )
+
             # Check if cycle target was hit → clean up
             engine = self._engines.get(slot_id)
             if engine is not None and getattr(engine, "_status", None) == "DONE":
@@ -989,6 +996,62 @@ class LiveTrader:
             else:
                 exit_order.created_at = time.time()
             return "holding"
+
+    async def _sell_residual_taker(
+        self,
+        slot_id: str,
+        token_id: str,
+        side: str,
+        entry_price: float,
+        sell_price: float,
+        tick: dict,
+    ) -> None:
+        """After maker sell, check for leftover shares and sell them as taker.
+
+        Typical case: bought 6, on-chain settled 5, sold 5 maker → 1 left.
+        Sell that 1 share as taker (FOK) at best_bid if profitable.
+        """
+        await asyncio.sleep(1.0)  # brief wait for settlement
+        residual_balance = await self._poly.get_token_balance(token_id)
+        if residual_balance < 1:
+            return
+
+        prefix = "yes" if side == "YES" else "no"
+        best_bid = tick.get(f"pm_{prefix}_best_bid") or 0.0
+        best_bid = round(best_bid, 2)
+
+        if best_bid <= 0:
+            log.info(
+                "<<< [%s] Residual %d shares but no best_bid, skipping taker sell",
+                slot_id, residual_balance,
+            )
+            return
+
+        # Sell residual at best_bid regardless of profit — these are leftover
+        # shares from the buy/sell size mismatch, already accounted for in PnL
+        log.info(
+            "<<< [%s] RESIDUAL TAKER SELL: %s sz=%d @ $%.2f "
+            "(entry=$%.2f, main_sell=$%.2f)",
+            slot_id, side, residual_balance, best_bid,
+            entry_price, sell_price,
+        )
+        oid = await self._poly.place_market_sell(
+            token_id, best_bid, residual_balance,
+        )
+        if oid:
+            residual_pnl = (best_bid - entry_price) * residual_balance
+            self._session_pnl += residual_pnl
+            self._residual.pop(slot_id, None)
+            log.info(
+                "+++ [%s] RESIDUAL SOLD! %s sz=%d @ $%.2f pnl=$%+.4f",
+                slot_id, side, residual_balance, best_bid, residual_pnl,
+            )
+        else:
+            log.warning(
+                "!!! [%s] RESIDUAL taker sell FAILED for %d shares "
+                "(will be left in wallet)",
+                slot_id, residual_balance,
+            )
 
     def _record_sell_fill(
         self, slot_id: str, exit_order: TrackedExit, sold_size: int,
