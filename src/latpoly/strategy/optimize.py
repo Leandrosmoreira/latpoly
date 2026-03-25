@@ -60,7 +60,7 @@ def suggest_params(trial: optuna.Trial) -> dict:
         "entry_window_min_s": trial.suggest_float("entry_window_min_s", 10.0, 90.0),
         "entry_window_max_s": trial.suggest_float("entry_window_max_s", 200.0, 900.0),
         # -- Position sizing --
-        "base_size_contracts": 5,  # fixed: min Polymarket maker size
+        "base_size_contracts": 6,  # fixed lot size aligned with live defaults
         "max_concurrent_positions": trial.suggest_int("max_concurrent_positions", 1, 15),
         "max_exposure_frac": trial.suggest_float("max_exposure_frac", 0.2, 0.8),
         # -- Exit strategy --

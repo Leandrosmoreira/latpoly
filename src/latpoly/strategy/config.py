@@ -55,13 +55,14 @@ class StrategyConfig:
     )
 
     # --- Position sizing ---
-    # Polymarket minimum: 5 shares for maker orders
-    # Below 5 shares → forced taker exit (1% fee)
+    # Polymarket minimum: 5 shares for maker orders.
+    # Default lot is 6 to tolerate occasional -1 settlement drift
+    # and still keep >=5 shares for clean maker exits.
     base_size_contracts: int = field(
-        default_factory=lambda: _env_int("LATPOLY_STRAT_BASE_SIZE", 5)
+        default_factory=lambda: _env_int("LATPOLY_STRAT_BASE_SIZE", 6)
     )
     max_position_contracts: int = field(
-        default_factory=lambda: _env_int("LATPOLY_STRAT_MAX_POSITION", 5)
+        default_factory=lambda: _env_int("LATPOLY_STRAT_MAX_POSITION", 6)
     )
     # Multi-position: up to N concurrent positions, capped by exposure
     max_concurrent_positions: int = field(

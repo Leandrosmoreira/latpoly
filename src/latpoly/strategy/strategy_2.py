@@ -2,7 +2,7 @@
 
 Uses the same Binance lag signal as the scalp strategy, but allows multiple
 sequential trades per market cycle.  Stops completely when cumulative realized
-PnL for the cycle hits +10% of 1 lot notional (5 * $0.50 * 10% = $0.25).
+PnL for the cycle hits +10% of 1 lot notional (6 * $0.50 * 10% = $0.30).
 Resets on market rotation.
 
 State machine:
@@ -10,10 +10,10 @@ State machine:
   DONE     — target hit, all activity blocked until next market_id
 
 Config (env vars):
-  LATPOLY_S2_ORDER_SIZE       = 5       (shares per order)
+  LATPOLY_S2_ORDER_SIZE       = 6       (shares per order)
   LATPOLY_S2_PROFIT_TICKS     = 2       (exit = entry + N ticks)
   LATPOLY_S2_CYCLE_BASE_PRICE = 0.50    (notional reference price)
-  LATPOLY_S2_CYCLE_TARGET_PCT = 0.10    (10% of lot notional = $0.25 default)
+  LATPOLY_S2_CYCLE_TARGET_PCT = 0.10    (10% of lot notional = $0.30 default)
   LATPOLY_S2_MAX_POSITION     = 15      (max shares held at once)
   LATPOLY_S2_MIN_TTX          = 120     (no new entries within Ns of expiry)
 """
@@ -53,14 +53,14 @@ class CycleTP10Engine(BaseStrategy):
         super().__init__(cfg)
 
         # --- Strategy-specific config (from env vars) ---
-        self._order_size = _env_int("LATPOLY_S2_ORDER_SIZE", 5)
+        self._order_size = _env_int("LATPOLY_S2_ORDER_SIZE", 6)
         self._profit_ticks = _env_int("LATPOLY_S2_PROFIT_TICKS", 2)
         self._cycle_base_price = _env_float("LATPOLY_S2_CYCLE_BASE_PRICE", 0.50)
         self._cycle_target_pct = _env_float("LATPOLY_S2_CYCLE_TARGET_PCT", 0.10)
         self._max_position = _env_int("LATPOLY_S2_MAX_POSITION", 15)
         self._min_ttx = _env_float("LATPOLY_S2_MIN_TTX", 120.0)
 
-        # Derived: 10% of 1 lot notional (5 * $0.50 * 10% = $0.25)
+        # Derived: 10% of 1 lot notional (6 * $0.50 * 10% = $0.30)
         self._cycle_base_notional = self._order_size * self._cycle_base_price
         self._cycle_target_pnl = self._cycle_base_notional * self._cycle_target_pct
 
