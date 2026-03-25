@@ -159,6 +159,8 @@ class LiveTrader:
 
         # Real order tracking: slot_id -> pending entry order
         self._entry_orders: dict[str, TrackedEntry] = {}
+        # Original entry price (before reprices) for reprice cap
+        self._entry_original_price: dict[str, float] = {}
 
         # Filled positions: slot_id -> entry that was confirmed filled
         self._filled_positions: dict[str, TrackedEntry] = {}
@@ -467,6 +469,19 @@ class LiveTrader:
                     else:
                         new_price = pm.no_best_ask or pm.no_best_bid or pending.price
                     new_price = round(new_price, 2)
+
+                    # CAP reprice: max +3 ticks above original signal price
+                    # Prevents buying at $0.53 when signal was at $0.44
+                    original_price = self._entry_original_price.get(slot_id, pending.price)
+                    max_reprice = round(original_price + 3 * TICK_SIZE, 2)
+                    if new_price > max_reprice:
+                        log.info(
+                            ">>> [%s] REPRICE CAPPED: $%.2f -> $%.2f "
+                            "(max=$%.2f = original $%.2f + 3 ticks)",
+                            slot_id, pending.price, new_price,
+                            max_reprice, original_price,
+                        )
+                        new_price = max_reprice
 
                     pending.reprice_count += 1
                     log.info(
@@ -958,15 +973,61 @@ class LiveTrader:
             return "holding"
 
         else:
-            # NOT FILLED -- repaint to best bid, but ONLY if profitable
-            # Minimum sell price = entry + 2 ticks (guaranteed profit)
-            min_sell = round(exit_order.entry_price + self.strat_cfg.fixed_exit_ticks * TICK_SIZE, 2)
+            # NOT FILLED -- repaint to best bid with decaying floor
+            checks = exit_order.check_count
+            entry_px = exit_order.entry_price
+            full_profit = round(entry_px + self.strat_cfg.fixed_exit_ticks * TICK_SIZE, 2)
+
+            # Floor decay schedule:
+            # checks 0-19:  floor = entry + 2 ticks (full profit)
+            # checks 20-39: floor = entry + 1 tick (reduced profit)
+            # checks 40+:   floor = entry price (breakeven, never loss)
+            if checks < 20:
+                min_sell = full_profit
+            elif checks < 40:
+                min_sell = round(entry_px + 1 * TICK_SIZE, 2)
+            else:
+                min_sell = entry_px
+
             prefix = "yes" if exit_order.side == "YES" else "no"
             best_bid = tick.get(f"pm_{prefix}_best_bid")
 
+            # Emergency taker sell after 60 checks (~5 min stuck)
+            if checks >= 60 and best_bid is not None and best_bid >= entry_px:
+                taker_price = round(best_bid, 2)
+                log.info(
+                    "!!! [%s] SELL EMERGENCY TAKER after %d checks: "
+                    "%s sz=%d @ $%.2f (entry=$%.2f)",
+                    slot_id, checks, exit_order.side,
+                    exit_order.size, taker_price, entry_px,
+                )
+                await self._poly.cancel_order(exit_order.order_id)
+                oid = await self._poly.place_market_sell(
+                    exit_order.token_id, taker_price, exit_order.size,
+                )
+                if oid:
+                    result = self._record_sell_fill(slot_id, exit_order, exit_order.size)
+                    engine = self._engines.get(slot_id)
+                    if engine is not None and getattr(engine, "_status", None) == "DONE":
+                        await self._handle_cycle_done(slot_id)
+                    return result
+                else:
+                    log.warning(
+                        "!!! [%s] Emergency taker FAILED, continuing maker",
+                        slot_id,
+                    )
+                    # Re-place maker at floor
+                    oid = await self._poly.place_limit_sell(
+                        exit_order.token_id, min_sell, exit_order.size,
+                    )
+                    if oid:
+                        exit_order.order_id = oid
+                        exit_order.sell_price = min_sell
+                        exit_order.created_at = time.time()
+                    return "holding"
+
             if best_bid is not None:
                 new_price = round(best_bid, 2)
-                # NEVER sell below entry + 2 ticks
                 new_price = max(min_sell, min(0.99, new_price))
 
                 if new_price != exit_order.sell_price:
@@ -1175,6 +1236,8 @@ class LiveTrader:
                 size=size,
                 tick_idx=tick_idx,
             )
+            # Save original price for reprice cap (max +3 ticks)
+            self._entry_original_price[slot_id] = price
             self._orders_placed += 1
             log.info(
                 ">>> [%s] STATE: ENTRY_PLACING -> ENTRY_WAIT_FILL "
