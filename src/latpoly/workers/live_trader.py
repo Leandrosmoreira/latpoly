@@ -692,21 +692,39 @@ class LiveTrader:
             return
 
         # Strategy 2: if balance < min_maker, sell TAKER (FOK) at best bid
+        # Strategy 2: if balance < min_maker, sell TAKER (FOK) at best bid
+        # but ONLY if profitable after taker fee (2%)
+        TAKER_FEE_PCT = 0.02
         use_taker = sell_size < self.strat_cfg.min_maker_size
+        taker_price = 0.0
         if use_taker:
-            # Taker sell at best_bid (immediate execution)
             pm = state.get_polymarket(slot_id)
             if entry.side == "YES":
-                taker_price = pm.yes_best_bid or sell_price
+                taker_price = pm.yes_best_bid or 0.0
             else:
-                taker_price = pm.no_best_bid or sell_price
+                taker_price = pm.no_best_bid or 0.0
             taker_price = round(taker_price, 2)
+
+            # Check profit after taker fee
+            net_per_share = taker_price * (1 - TAKER_FEE_PCT) - entry.price
+            net_pnl = net_per_share * sell_size
+
+            if net_pnl <= 0:
+                log.warning(
+                    "<<< [%s] TAKER SELL blocked: best_bid=$%.2f - fee(2%%)=$%.4f "
+                    "= net $%.4f < entry $%.2f → LOSS $%.4f. Holding to expiry.",
+                    slot_id, taker_price, taker_price * TAKER_FEE_PCT,
+                    taker_price * (1 - TAKER_FEE_PCT), entry.price, net_pnl,
+                )
+                # Don't retry, hold to expiry
+                self._sell_fail_count[slot_id] = 9999
+                self._sell_retry_after[slot_id] = float("inf")
+                return
 
             log.info(
                 "<<< [%s] Placing SELL TAKER (FOK): %s @ $%.2f sz=%d "
-                "(balance=%d < min_maker=%d, entry=$%.2f)",
-                slot_id, entry.side, taker_price, sell_size,
-                balance, self.strat_cfg.min_maker_size, entry.price,
+                "(net_pnl=$%+.4f after 2%% fee, entry=$%.2f)",
+                slot_id, entry.side, taker_price, sell_size, net_pnl, entry.price,
             )
             oid = await self._poly.place_market_sell(
                 entry.token_id, taker_price, sell_size,
