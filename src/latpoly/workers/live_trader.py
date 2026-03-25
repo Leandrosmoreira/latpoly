@@ -692,12 +692,25 @@ class LiveTrader:
             return
 
         # Strategy 2: if balance < min_maker, sell TAKER (FOK) at best bid
-        # Strategy 2: if balance < min_maker, sell TAKER (FOK) at best bid
-        # but ONLY if profitable after taker fee (2%)
-        TAKER_FEE_PCT = 0.02
-        use_taker = sell_size < self.strat_cfg.min_maker_size
+        # Always try MAKER sell first (even with < 5 shares, Polymarket
+        # accepts maker if notional >= $1, e.g. 4 shares × $0.42 = $1.68)
+        use_taker = False
         taker_price = 0.0
-        if use_taker:
+
+        log.info(
+            "<<< [%s] Placing SELL MAKER: %s @ $%.2f (entry=$%.2f + %d ticks) sz=%d "
+            "(balance=%d on-chain)",
+            slot_id, entry.side, sell_price, entry.price, exit_ticks, sell_size,
+            balance,
+        )
+        oid = await self._poly.place_limit_sell(
+            entry.token_id, sell_price, sell_size,
+        )
+
+        # If maker sell fails AND balance < min_maker, try taker as fallback
+        if not oid and sell_size < self.strat_cfg.min_maker_size:
+            TAKER_FEE_PCT = 0.02
+            use_taker = True
             pm = state.get_polymarket(slot_id)
             if entry.side == "YES":
                 taker_price = pm.yes_best_bid or 0.0
@@ -711,33 +724,23 @@ class LiveTrader:
 
             if net_pnl <= 0:
                 log.warning(
-                    "<<< [%s] TAKER SELL blocked: best_bid=$%.2f - fee(2%%)=$%.4f "
-                    "= net $%.4f < entry $%.2f → LOSS $%.4f. Holding to expiry.",
-                    slot_id, taker_price, taker_price * TAKER_FEE_PCT,
-                    taker_price * (1 - TAKER_FEE_PCT), entry.price, net_pnl,
+                    "<<< [%s] TAKER SELL also blocked: best_bid=$%.2f net=$%.4f "
+                    "< entry $%.2f → LOSS. Will retry in 15s.",
+                    slot_id, taker_price,
+                    taker_price * (1 - TAKER_FEE_PCT), entry.price,
                 )
-                # Don't retry, hold to expiry
-                self._sell_fail_count[slot_id] = 9999
-                self._sell_retry_after[slot_id] = float("inf")
+                fails = self._sell_fail_count.get(slot_id, 0) + 1
+                self._sell_fail_count[slot_id] = fails
+                self._sell_retry_after[slot_id] = time.time() + 15.0
                 return
 
             log.info(
-                "<<< [%s] Placing SELL TAKER (FOK): %s @ $%.2f sz=%d "
-                "(net_pnl=$%+.4f after 2%% fee, entry=$%.2f)",
-                slot_id, entry.side, taker_price, sell_size, net_pnl, entry.price,
+                "<<< [%s] MAKER failed, trying TAKER (FOK): %s @ $%.2f sz=%d "
+                "(net_pnl=$%+.4f after 2%% fee)",
+                slot_id, entry.side, taker_price, sell_size, net_pnl,
             )
             oid = await self._poly.place_market_sell(
                 entry.token_id, taker_price, sell_size,
-            )
-        else:
-            log.info(
-                "<<< [%s] Placing SELL MAKER: %s @ $%.2f (entry=$%.2f + %d ticks) sz=%d "
-                "(balance=%d on-chain)",
-                slot_id, entry.side, sell_price, entry.price, exit_ticks, sell_size,
-                balance,
-            )
-            oid = await self._poly.place_limit_sell(
-                entry.token_id, sell_price, sell_size,
             )
 
         actual_sell_price = taker_price if use_taker else sell_price
