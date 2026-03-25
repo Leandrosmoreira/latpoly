@@ -10,7 +10,7 @@ State machine:
   DONE     — target hit, all activity blocked until next market_id
 
 Config (env vars):
-  LATPOLY_S2_ORDER_SIZE       = 6       (shares per order)
+  LATPOLY_S2_ORDER_SIZE       = 6       (shares per order, buys 6 so 5 settle on-chain)
   LATPOLY_S2_PROFIT_TICKS     = 2       (exit = entry + N ticks)
   LATPOLY_S2_CYCLE_BASE_PRICE = 0.50    (notional reference price)
   LATPOLY_S2_CYCLE_TARGET_PCT = 0.10    (10% of lot notional = $0.30 default)

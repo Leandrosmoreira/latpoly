@@ -251,16 +251,15 @@ class LiveTrader:
         - Total (residual + buy) should be a multiple of min_maker_size for clean SELL lots
 
         Examples (min_maker_size=5, base_size=6):
-          residual=0 -> buy 6   (total=6,  maker SELL allowed)
+          residual=0 -> buy 6   (total=6, on-chain settles ~5, 1 SELL lot)
           residual=1 -> buy 9   (total=10, 2 SELL lots)
           residual=2 -> buy 8   (total=10, 2 SELL lots)
           residual=3 -> buy 7   (total=10, 2 SELL lots)
           residual=4 -> buy 6   (total=10, 2 SELL lots)
           residual=5 -> buy 5   (total=10, 2 SELL lots)
-          residual=7 -> buy 8   (total=15, 3 SELL lots)
         """
         min_lot = self.strat_cfg.min_maker_size  # 5
-        base = self.strat_cfg.base_size_contracts  # default 6
+        base = self.strat_cfg.base_size_contracts  # 6
         residual = self._get_residual(slot_id)
 
         if residual <= 0:
