@@ -50,13 +50,19 @@ async def _run(cfg: Config) -> None:
     tasks.append(asyncio.create_task(signal_worker(cfg, state, writer_queue), name="W3-signal"))
     tasks.append(asyncio.create_task(writer_worker(cfg, state, writer_queue), name="W4-writer"))
 
-    # W5: paper or live trader based on config
+    # W5: paper, live, or mm trader based on config
     if cfg.trading_mode == "live":
         from latpoly.workers.live_trader import live_trader_worker
         tasks.append(
             asyncio.create_task(live_trader_worker(cfg, state, writer_queue), name="W5-live")
         )
         log.info("Trading mode: LIVE (real orders on Polymarket)")
+    elif cfg.trading_mode == "mm":
+        from latpoly.workers.mm_trader import mm_trader_worker
+        tasks.append(
+            asyncio.create_task(mm_trader_worker(cfg, state, writer_queue), name="W5-mm")
+        )
+        log.info("Trading mode: MM (market maker on Polymarket)")
     else:
         tasks.append(
             asyncio.create_task(paper_trader_worker(cfg, state, writer_queue), name="W5-paper")
@@ -96,6 +102,9 @@ async def _run(cfg: Config) -> None:
         if name == "W5-live":
             from latpoly.workers.live_trader import live_trader_worker as _lt
             return asyncio.create_task(_lt(cfg, state, writer_queue), name=name)
+        if name == "W5-mm":
+            from latpoly.workers.mm_trader import mm_trader_worker as _mm
+            return asyncio.create_task(_mm(cfg, state, writer_queue), name=name)
         return None
 
     # Monitor tasks for crashes — restart critical workers
