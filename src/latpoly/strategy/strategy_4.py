@@ -27,9 +27,11 @@ Config (env vars):
   LATPOLY_S4_ORDER_SIZE          = 6
   LATPOLY_S4_PROFIT_TICKS        = 2
   LATPOLY_S4_ZSCORE_BASE         = 1.5
+  LATPOLY_S4_ZSCORE_CAUTIOUS     = 2.0
   LATPOLY_S4_ZSCORE_SELECTIVE    = 2.5
+  LATPOLY_S4_ZSCORE_TIGHT        = 3.5
   LATPOLY_S4_ZSCORE_DEFENSIVE    = 999.0
-  LATPOLY_S4_BN_MOVE_MIN         = 2.0
+  LATPOLY_S4_BN_MOVE_MIN         = 6.0
   LATPOLY_S4_MAX_SAME_SIDE_LOSSES = 2
   LATPOLY_S4_MAX_CYCLE_TRADES    = 8
   LATPOLY_S4_FREEZE_TTX          = 120
@@ -39,7 +41,7 @@ Config (env vars):
   LATPOLY_S4_CYCLE_TARGET_PCT    = 0.10
   LATPOLY_S4_MAX_DATA_AGE_MS     = 5000
   LATPOLY_S4_COOLDOWN_TICKS      = 5
-  LATPOLY_S4_MAX_SPREAD          = 0.06
+  LATPOLY_S4_MAX_SPREAD          = 0.08
   LATPOLY_S4_MIN_DEPTH           = 50
   LATPOLY_S4_RET1S_MIN           = 0.0
 """
@@ -48,7 +50,6 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional
 
 from latpoly.strategy.base import BaseStrategy
 from latpoly.strategy.config import StrategyConfig
@@ -82,9 +83,11 @@ class Strategy4Engine(BaseStrategy):
         self._order_size = _env_int("LATPOLY_S4_ORDER_SIZE", 6)
         self._profit_ticks = _env_int("LATPOLY_S4_PROFIT_TICKS", 2)
         self._zscore_base = _env_float("LATPOLY_S4_ZSCORE_BASE", 1.5)
+        self._zscore_cautious = _env_float("LATPOLY_S4_ZSCORE_CAUTIOUS", 2.0)
         self._zscore_selective = _env_float("LATPOLY_S4_ZSCORE_SELECTIVE", 2.5)
+        self._zscore_tight = _env_float("LATPOLY_S4_ZSCORE_TIGHT", 3.5)
         self._zscore_defensive = _env_float("LATPOLY_S4_ZSCORE_DEFENSIVE", 999.0)
-        self._bn_move_min = _env_float("LATPOLY_S4_BN_MOVE_MIN", 2.0)
+        self._bn_move_min = _env_float("LATPOLY_S4_BN_MOVE_MIN", 6.0)
         self._max_same_side_losses = _env_int("LATPOLY_S4_MAX_SAME_SIDE_LOSSES", 2)
         self._max_cycle_trades = _env_int("LATPOLY_S4_MAX_CYCLE_TRADES", 8)
         self._freeze_ttx = _env_float("LATPOLY_S4_FREEZE_TTX", 120.0)
@@ -94,7 +97,7 @@ class Strategy4Engine(BaseStrategy):
         self._cycle_target_pct = _env_float("LATPOLY_S4_CYCLE_TARGET_PCT", 0.10)
         self._max_data_age_ms = _env_float("LATPOLY_S4_MAX_DATA_AGE_MS", 5000.0)
         self._cooldown_ticks = _env_int("LATPOLY_S4_COOLDOWN_TICKS", 5)
-        self._max_spread = _env_float("LATPOLY_S4_MAX_SPREAD", 0.06)
+        self._max_spread = _env_float("LATPOLY_S4_MAX_SPREAD", 0.08)
         self._min_depth = _env_float("LATPOLY_S4_MIN_DEPTH", 50.0)
         self._ret1s_min = _env_float("LATPOLY_S4_RET1S_MIN", 0.0)
 
@@ -117,7 +120,6 @@ class Strategy4Engine(BaseStrategy):
         # --- Per-tick state ---
         self._last_condition_id: str = ""
         self._last_entry_tick_idx: int = -9999
-        self._current_position_shares: int = 0
 
         # --- Daily counters ---
         self._daily_trade_count: int = 0
@@ -125,11 +127,14 @@ class Strategy4Engine(BaseStrategy):
 
         log.info(
             "[strategy_4] init: order_size=%d profit_ticks=%d "
-            "zscore_base=%.1f/selective=%.1f/defensive=%.0f "
-            "max_side_losses=%d max_cycle_trades=%d "
+            "zscore=%.1f/%.1f/%.1f/%.1f/%.0f "
+            "bn_move_min=%.1f max_side_losses=%d max_cycle_trades=%d "
             "freeze_ttx=%.0fs target=$%.2f (%.0f%%)",
             self._order_size, self._profit_ticks,
-            self._zscore_base, self._zscore_selective, self._zscore_defensive,
+            self._zscore_base, self._zscore_cautious,
+            self._zscore_selective, self._zscore_tight,
+            self._zscore_defensive,
+            self._bn_move_min,
             self._max_same_side_losses, self._max_cycle_trades,
             self._freeze_ttx,
             self._cycle_target_pnl, self._cycle_target_pct * 100,
@@ -189,10 +194,6 @@ class Strategy4Engine(BaseStrategy):
         if tte_s > self.cfg.entry_window_max_s:
             return Signal(action="NONE", side="", reason="too_early")
 
-        # Position limit
-        if self._current_position_shares >= self._order_size:
-            return Signal(action="NONE", side="", reason="max_position")
-
         # --- Entry signal ---
         return self._check_entry(tick, tick_idx)
 
@@ -206,7 +207,6 @@ class Strategy4Engine(BaseStrategy):
         Preserves cycle state, inventory tracking, side blocks.
         Only clears per-trade tracking.
         """
-        self._current_position_shares = 0
         self._last_entry_tick_idx = -9999
 
     def notify_trade_result(self, pnl: float) -> None:
@@ -215,11 +215,12 @@ class Strategy4Engine(BaseStrategy):
         self._trade_count_cycle += 1
         self._daily_trade_count += 1
         self._daily_pnl += pnl
-        self._current_position_shares = 0
 
         side = self._last_trade_side
 
         # --- Side loss tracking ---
+        # pnl > 0 = win (reset counter), pnl < 0 = loss (increment),
+        # pnl == 0 = breakeven (neutral — don't touch counters)
         if pnl > 0:
             # Win → reset consecutive loss counter for this side
             if side == "YES":
@@ -232,7 +233,7 @@ class Strategy4Engine(BaseStrategy):
                 self._trade_count_cycle, side, pnl,
                 self._yes_consecutive_losses, self._no_consecutive_losses,
             )
-        else:
+        elif pnl < 0:
             # Loss → increment counter, check for blocking
             if side == "YES":
                 self._yes_consecutive_losses += 1
@@ -260,6 +261,14 @@ class Strategy4Engine(BaseStrategy):
                 " [BLOCKED]" if self._yes_blocked else "",
                 self._no_consecutive_losses,
                 " [BLOCKED]" if self._no_blocked else "",
+            )
+        else:
+            # Breakeven (pnl == 0) — neutral, don't change loss counters
+            log.info(
+                "$$$ [strategy_4] BREAKEVEN trade #%d side=%s pnl=$0.0000  "
+                "loss counters unchanged: YES=%d NO=%d",
+                self._trade_count_cycle, side,
+                self._yes_consecutive_losses, self._no_consecutive_losses,
             )
 
         # Cycle PnL log
@@ -292,6 +301,12 @@ class Strategy4Engine(BaseStrategy):
         """Return dynamic zscore threshold based on inventory exposure.
 
         Avellaneda-inspired: more trades in cycle → higher bar to enter.
+        Gradual escalation so all 8 trade slots are usable:
+          trades 0-1: base     (1.5) — normal
+          trades 2-3: cautious (2.0) — slightly stricter
+          trades 4-5: selective(2.5) — only strong signals
+          trades 6-7: tight    (3.5) — very strong signals only
+          trades 8+:  defensive(999) — blocked (at cap)
         """
         # Both sides blocked → defensive (effectively stop)
         if self._yes_blocked and self._no_blocked:
@@ -301,9 +316,13 @@ class Strategy4Engine(BaseStrategy):
         if trades <= 1:
             return self._zscore_base       # 1.5 — normal
         elif trades <= 3:
+            return self._zscore_cautious   # 2.0 — cautious
+        elif trades <= 5:
             return self._zscore_selective  # 2.5 — selective
+        elif trades <= 7:
+            return self._zscore_tight      # 3.5 — tight
         else:
-            return self._zscore_defensive  # 999 — blocked
+            return self._zscore_defensive  # 999 — blocked (at cap)
 
     # ------------------------------------------------------------------
     # Internal — entry logic
@@ -410,7 +429,6 @@ class Strategy4Engine(BaseStrategy):
 
         # --- ENTRY SIGNAL ---
         self._last_entry_tick_idx = tick_idx
-        self._current_position_shares += size
         self._last_trade_side = side
 
         action = "BUY_YES" if side == "YES" else "BUY_NO"
@@ -454,7 +472,6 @@ class Strategy4Engine(BaseStrategy):
         self._status = "WORKING"
         self._realized_pnl_cycle = 0.0
         self._trade_count_cycle = 0
-        self._current_position_shares = 0
         self._last_entry_tick_idx = -9999
 
         # Reset inventory / side blocking

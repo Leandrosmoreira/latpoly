@@ -1306,10 +1306,15 @@ class LiveTrader:
 
         if filled:
             loss = filled.price * filled.size
+            pnl = -loss
             self._session_trades += 1
-            self._session_pnl -= loss
+            self._session_pnl += pnl
             self._slot_trades[slot_id] = self._slot_trades.get(slot_id, 0) + 1
-            self._slot_pnl[slot_id] = self._slot_pnl.get(slot_id, 0.0) - loss
+            self._slot_pnl[slot_id] = self._slot_pnl.get(slot_id, 0.0) + pnl
+            # Notify engine so cycle PnL / side blocking are accurate
+            engine = self._engines.get(slot_id)
+            if engine is not None:
+                engine.notify_trade_result(pnl)
             log.warning(
                 "~~~ [%s] Rotation with filled position (%s @ $%.2f × %d) -- "
                 "LOSS=$-%.2f  [session: $%+.2f]",
@@ -1319,10 +1324,15 @@ class LiveTrader:
         elif residual:
             # Only count residual if no filled_positions (avoid double-count)
             res_loss = residual["avg_entry"] * residual["shares"]
+            pnl = -res_loss
             self._session_trades += 1
-            self._session_pnl -= res_loss
+            self._session_pnl += pnl
             self._slot_trades[slot_id] = self._slot_trades.get(slot_id, 0) + 1
-            self._slot_pnl[slot_id] = self._slot_pnl.get(slot_id, 0.0) - res_loss
+            self._slot_pnl[slot_id] = self._slot_pnl.get(slot_id, 0.0) + pnl
+            # Notify engine so cycle PnL / side blocking are accurate
+            engine = self._engines.get(slot_id)
+            if engine is not None:
+                engine.notify_trade_result(pnl)
             log.warning(
                 "~~~ [%s] Rotation with %d residual %s shares -- "
                 "LOSS=$-%.2f  [session: $%+.2f]",
