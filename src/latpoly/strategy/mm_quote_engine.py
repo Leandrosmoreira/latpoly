@@ -15,7 +15,7 @@ Config (env vars):
   LATPOLY_MM_MAX_SPREAD         = 12      # max spread in ticks
   LATPOLY_MM_MAX_INVENTORY      = 8       # hard limit
   LATPOLY_MM_SOFT_INVENTORY     = 4       # skew threshold
-  LATPOLY_MM_QUOTE_SIZE         = 5       # shares per side
+  LATPOLY_MM_QUOTE_SIZE         = 6       # shares per side
   LATPOLY_MM_MIN_MAKER_SIZE     = 5       # Polymarket minimum
   LATPOLY_MM_ADVERSE_THRESHOLD  = 10.0    # bn_move to widen
   LATPOLY_MM_ADVERSE_EXTRA_TICKS = 3      # extra spread on adverse
@@ -106,7 +106,7 @@ class MMParams:
         self.max_spread_ticks = _env_int("LATPOLY_MM_MAX_SPREAD", 12)
         self.max_inventory = _env_int("LATPOLY_MM_MAX_INVENTORY", 8)
         self.soft_inventory = _env_int("LATPOLY_MM_SOFT_INVENTORY", 4)
-        self.quote_size = _env_int("LATPOLY_MM_QUOTE_SIZE", 5)
+        self.quote_size = _env_int("LATPOLY_MM_QUOTE_SIZE", 6)
         self.min_maker_size = _env_int("LATPOLY_MM_MIN_MAKER_SIZE", 5)
         self.adverse_threshold = _env_float("LATPOLY_MM_ADVERSE_THRESHOLD", 10.0)
         self.adverse_extra_ticks = _env_int("LATPOLY_MM_ADVERSE_EXTRA_TICKS", 3)
