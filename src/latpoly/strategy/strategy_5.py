@@ -177,6 +177,8 @@ class InformedMMQuoteEngine(MMQuoteEngine):
         tick: dict,
         net_inventory: int,
         time_phase: str,
+        inventory_yes: int = 0,
+        inventory_no: int = 0,
         avg_entry_yes: float = 0.0,
         avg_entry_no: float = 0.0,
     ) -> QuotePair | None:
@@ -185,8 +187,12 @@ class InformedMMQuoteEngine(MMQuoteEngine):
         Extends parent with:
         - Trend-based side blocking and spread skewing
         - Sell floor protection (avg_entry + min_profit_ticks)
+        - Total inventory control (YES+NO, not just net)
+        - Price extreme protection (don't quote near 0 or 1)
 
         Extra args vs parent:
+            inventory_yes: total YES shares held
+            inventory_no: total NO shares held
             avg_entry_yes: average entry price for YES inventory
             avg_entry_no: average entry price for NO inventory
         """
@@ -291,15 +297,25 @@ class InformedMMQuoteEngine(MMQuoteEngine):
             if bid_yes_price > max_bid_yes_for_no_exit:
                 bid_yes_price = max_bid_yes_for_no_exit
 
-        # Clamp all prices
+        # --- Price extreme protection ---
+        # Don't buy YES above $0.90 or below $0.10
+        # (near expiry, market goes to 0 or 1 and we'd get picked off)
+        EXTREME_LOW = 0.10
+        EXTREME_HIGH = 0.90
+        bid_yes_price = round(_clamp(bid_yes_price, EXTREME_LOW, EXTREME_HIGH), 2)
+        bid_no_price = round(_clamp(bid_no_price, EXTREME_LOW, EXTREME_HIGH), 2)
+
+        # Final clamp within valid range
         bid_yes_price = round(_clamp(bid_yes_price, MIN_PRICE, MAX_PRICE), 2)
         bid_no_price = round(_clamp(bid_no_price, MIN_PRICE, MAX_PRICE), 2)
 
         # --- Step 11: Compute sizes with inventory + trend ---
         abs_inv = abs(net_inventory)
+        total_inv = inventory_yes + inventory_no
         base_size = self.p.quote_size
 
-        # Start with inventory-based sizing (same as parent)
+        # Start with inventory-based sizing
+        # Priority: exit > total hard > net hard > total soft > net soft > normal
         if time_phase == "exit":
             if net_inventory > 0:
                 bid_yes_size = 0
@@ -310,14 +326,25 @@ class InformedMMQuoteEngine(MMQuoteEngine):
             else:
                 bid_yes_size = 0
                 bid_no_size = 0
+        elif total_inv >= self.p.max_inventory * 2:
+            # TOTAL inventory hard limit: stop buying both sides entirely
+            # Only allow exits when we hold too much total
+            bid_yes_size = 0
+            bid_no_size = 0
         elif abs_inv >= self.p.max_inventory:
+            # Net inventory hard limit: cancel entry side entirely
             if net_inventory > 0:
                 bid_yes_size = 0
                 bid_no_size = base_size
             else:
                 bid_yes_size = base_size
                 bid_no_size = 0
+        elif total_inv >= self.p.max_inventory:
+            # TOTAL soft limit: reduce both sides to minimum
+            bid_yes_size = self.p.min_maker_size
+            bid_no_size = self.p.min_maker_size
         elif abs_inv >= self.p.soft_inventory:
+            # Net soft limit: reduce entry side to minimum
             if net_inventory > 0:
                 bid_yes_size = self.p.min_maker_size
                 bid_no_size = base_size

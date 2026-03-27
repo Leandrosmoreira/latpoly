@@ -34,6 +34,7 @@ from latpoly.strategy.mm_quote_engine import (
     QuotePair,
     TICK_SIZE,
 )
+from latpoly.strategy.strategy_5 import InformedMMQuoteEngine, S5Params
 
 log = logging.getLogger(__name__)
 
@@ -130,10 +131,24 @@ class MMTrader:
         slot_ids: list[str],
         poly: PolyClient,
         output_dir: str = "data/mm",
+        use_s5: bool = False,
     ) -> None:
         self._params = params
         self._poly = poly
-        self._engine = MMQuoteEngine(params)
+        self._use_s5 = use_s5
+        if use_s5:
+            s5_params = S5Params()
+            self._engine = InformedMMQuoteEngine(params, s5_params)
+            log.info(
+                "[mm_trader] Using Strategy 5 (Informed MM): "
+                "trend_strong=%.4f trend_mild=%.4f spread_mult=%.1f "
+                "min_profit_ticks=%d trend_block_inv=%d",
+                s5_params.trend_strong, s5_params.trend_mild,
+                s5_params.trend_spread_mult, s5_params.min_profit_ticks,
+                s5_params.trend_block_inv,
+            )
+        else:
+            self._engine = MMQuoteEngine(params)
         self._slots: dict[str, SlotMMState] = {
             sid: SlotMMState() for sid in slot_ids
         }
@@ -222,10 +237,17 @@ class MMTrader:
         await self._check_fills(slot_id)
 
         # --- Compute desired quotes ---
-        desired = self._engine.compute_quotes(
-            tick, ss.net_inventory, time_phase,
-            inventory_yes=ss.inventory_yes, inventory_no=ss.inventory_no,
-        )
+        if self._use_s5:
+            desired = self._engine.compute_quotes(
+                tick, ss.net_inventory, time_phase,
+                inventory_yes=ss.inventory_yes, inventory_no=ss.inventory_no,
+                avg_entry_yes=ss.avg_entry_yes, avg_entry_no=ss.avg_entry_no,
+            )
+        else:
+            desired = self._engine.compute_quotes(
+                tick, ss.net_inventory, time_phase,
+                inventory_yes=ss.inventory_yes, inventory_no=ss.inventory_no,
+            )
         if desired is None:
             return  # Cannot quote (stale data, no mid, etc.)
 
@@ -720,6 +742,9 @@ async def mm_trader_worker(
 
     params = MMParams()
 
+    # Strategy 5 (Informed MM) toggle
+    use_s5 = os.environ.get("LATPOLY_MM_STRATEGY", "").strip().lower() in ("s5", "strategy_5", "informed")
+
     # Filter to allowed MM slots
     allowed_raw = os.environ.get("LATPOLY_MM_SLOTS", "btc-15m")
     allowed_ids = {s.strip() for s in allowed_raw.split(",") if s.strip()}
@@ -731,14 +756,15 @@ async def mm_trader_worker(
         return
 
     slot_ids = [s.slot_id for s in mm_slots]
-    log.info("[mm_trader] Starting MM on slots: %s", slot_ids)
+    log.info("[mm_trader] Starting MM on slots: %s  strategy=%s",
+             slot_ids, "S5-informed" if use_s5 else "base-AS")
 
     # Initialize PolyClient
     poly = PolyClient()
     poly.connect()
     await poly.cancel_all()  # clean orphan orders from prior session
 
-    trader = MMTrader(params, slot_ids, poly)
+    trader = MMTrader(params, slot_ids, poly, use_s5=use_s5)
 
     # Reuse signal infrastructure for tick building
     from latpoly.workers.signal import (
