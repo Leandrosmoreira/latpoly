@@ -139,6 +139,8 @@ class MMQuoteEngine:
         tick: dict,
         net_inventory: int,
         time_phase: str,
+        inventory_yes: int = 0,
+        inventory_no: int = 0,
     ) -> QuotePair | None:
         """Compute optimal bid/ask quotes.
 
@@ -146,6 +148,8 @@ class MMQuoteEngine:
             tick: normalized tick dict from signal worker
             net_inventory: positive = long YES, negative = long NO
             time_phase: "normal", "reduce", "exit", "halt"
+            inventory_yes: total YES shares held
+            inventory_no: total NO shares held
 
         Returns:
             QuotePair with desired prices and sizes, or None if cannot quote.
@@ -232,40 +236,45 @@ class MMQuoteEngine:
 
         # --- Step 9: Compute sizes with inventory skew ---
         abs_inv = abs(net_inventory)
+        total_inv = inventory_yes + inventory_no
         base_size = self.p.quote_size
 
         if time_phase == "exit":
             # Exit mode: only quote the exit side
             if net_inventory > 0:
-                # Long YES → only ask (= bid_no)
                 bid_yes_size = 0
                 bid_no_size = min(base_size, net_inventory)
             elif net_inventory < 0:
-                # Long NO → only bid_yes to buy back
                 bid_yes_size = min(base_size, abs_inv)
                 bid_no_size = 0
             else:
-                # Flat in exit mode → don't open new risk
                 bid_yes_size = 0
                 bid_no_size = 0
+        elif total_inv >= self.p.max_inventory * 2:
+            # TOTAL inventory hard limit: stop buying both sides entirely
+            # Only allow exits (sells) when we hold too much total
+            bid_yes_size = 0
+            bid_no_size = 0
         elif abs_inv >= self.p.max_inventory:
-            # Hard limit: cancel entry side entirely
+            # Net inventory hard limit: cancel entry side entirely
             if net_inventory > 0:
-                # Long YES → cancel bid_yes, keep bid_no (= ask_yes for exit)
                 bid_yes_size = 0
                 bid_no_size = base_size
             else:
-                # Long NO → cancel bid_no, keep bid_yes for exit
                 bid_yes_size = base_size
                 bid_no_size = 0
+        elif total_inv >= self.p.max_inventory:
+            # TOTAL soft limit: reduce both sides to minimum
+            bid_yes_size = self.p.min_maker_size
+            bid_no_size = self.p.min_maker_size
         elif abs_inv >= self.p.soft_inventory:
-            # Soft limit: reduce entry side to minimum
+            # Net soft limit: reduce entry side to minimum
             if net_inventory > 0:
-                bid_yes_size = self.p.min_maker_size  # reduced
-                bid_no_size = base_size               # full (exit side)
+                bid_yes_size = self.p.min_maker_size
+                bid_no_size = base_size
             elif net_inventory < 0:
-                bid_yes_size = base_size               # full (exit side)
-                bid_no_size = self.p.min_maker_size   # reduced
+                bid_yes_size = base_size
+                bid_no_size = self.p.min_maker_size
             else:
                 bid_yes_size = base_size
                 bid_no_size = base_size

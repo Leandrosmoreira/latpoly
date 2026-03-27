@@ -222,7 +222,10 @@ class MMTrader:
         await self._check_fills(slot_id)
 
         # --- Compute desired quotes ---
-        desired = self._engine.compute_quotes(tick, ss.net_inventory, time_phase)
+        desired = self._engine.compute_quotes(
+            tick, ss.net_inventory, time_phase,
+            inventory_yes=ss.inventory_yes, inventory_no=ss.inventory_no,
+        )
         if desired is None:
             return  # Cannot quote (stale data, no mid, etc.)
 
@@ -261,7 +264,8 @@ class MMTrader:
                 continue
 
             # Check size_matched field
-            size_matched = int(order_info.get("size_matched", 0) or 0)
+            raw_matched = order_info.get("size_matched", 0) or 0
+            size_matched = int(float(raw_matched))
             status = order_info.get("status", "")
 
             if status in ("matched", "filled"):
