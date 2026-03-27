@@ -10,15 +10,15 @@ Computes optimal bid/ask quotes based on:
   - Adverse selection risk (Binance move since last Polymarket update)
 
 Config (env vars):
-  LATPOLY_MM_GAMMA              = 0.3     # risk aversion
-  LATPOLY_MM_BASE_SPREAD        = 2       # min spread in ticks
-  LATPOLY_MM_MAX_SPREAD         = 8       # max spread in ticks
-  LATPOLY_MM_MAX_INVENTORY      = 12      # hard limit
-  LATPOLY_MM_SOFT_INVENTORY     = 6       # skew threshold
+  LATPOLY_MM_GAMMA              = 0.5     # risk aversion
+  LATPOLY_MM_BASE_SPREAD        = 4       # min spread in ticks
+  LATPOLY_MM_MAX_SPREAD         = 12      # max spread in ticks
+  LATPOLY_MM_MAX_INVENTORY      = 8       # hard limit
+  LATPOLY_MM_SOFT_INVENTORY     = 4       # skew threshold
   LATPOLY_MM_QUOTE_SIZE         = 5       # shares per side
   LATPOLY_MM_MIN_MAKER_SIZE     = 5       # Polymarket minimum
-  LATPOLY_MM_ADVERSE_THRESHOLD  = 15.0    # bn_move to widen
-  LATPOLY_MM_ADVERSE_EXTRA_TICKS = 2      # extra spread on adverse
+  LATPOLY_MM_ADVERSE_THRESHOLD  = 10.0    # bn_move to widen
+  LATPOLY_MM_ADVERSE_EXTRA_TICKS = 3      # extra spread on adverse
   LATPOLY_MM_NORMAL_CUTOFF_S    = 120
   LATPOLY_MM_REDUCE_CUTOFF_S    = 60
   LATPOLY_MM_EXIT_CUTOFF_S      = 30
@@ -101,21 +101,21 @@ class MMParams:
     cycle_window_s: float = 0.0
 
     def __init__(self) -> None:
-        self.gamma = _env_float("LATPOLY_MM_GAMMA", 0.3)
-        self.base_spread_ticks = _env_int("LATPOLY_MM_BASE_SPREAD", 2)
-        self.max_spread_ticks = _env_int("LATPOLY_MM_MAX_SPREAD", 8)
-        self.max_inventory = _env_int("LATPOLY_MM_MAX_INVENTORY", 12)
-        self.soft_inventory = _env_int("LATPOLY_MM_SOFT_INVENTORY", 6)
+        self.gamma = _env_float("LATPOLY_MM_GAMMA", 0.5)
+        self.base_spread_ticks = _env_int("LATPOLY_MM_BASE_SPREAD", 4)
+        self.max_spread_ticks = _env_int("LATPOLY_MM_MAX_SPREAD", 12)
+        self.max_inventory = _env_int("LATPOLY_MM_MAX_INVENTORY", 8)
+        self.soft_inventory = _env_int("LATPOLY_MM_SOFT_INVENTORY", 4)
         self.quote_size = _env_int("LATPOLY_MM_QUOTE_SIZE", 5)
         self.min_maker_size = _env_int("LATPOLY_MM_MIN_MAKER_SIZE", 5)
-        self.adverse_threshold = _env_float("LATPOLY_MM_ADVERSE_THRESHOLD", 15.0)
-        self.adverse_extra_ticks = _env_int("LATPOLY_MM_ADVERSE_EXTRA_TICKS", 2)
+        self.adverse_threshold = _env_float("LATPOLY_MM_ADVERSE_THRESHOLD", 10.0)
+        self.adverse_extra_ticks = _env_int("LATPOLY_MM_ADVERSE_EXTRA_TICKS", 3)
         self.normal_cutoff_s = _env_float("LATPOLY_MM_NORMAL_CUTOFF_S", 120.0)
         self.reduce_cutoff_s = _env_float("LATPOLY_MM_REDUCE_CUTOFF_S", 60.0)
         self.exit_cutoff_s = _env_float("LATPOLY_MM_EXIT_CUTOFF_S", 30.0)
         self.max_data_age_ms = _env_float("LATPOLY_MM_MAX_DATA_AGE_MS", 5000.0)
         self.fill_check_interval_s = _env_float("LATPOLY_MM_FILL_CHECK_INTERVAL", 3.0)
-        self.max_reprices_per_s = _env_int("LATPOLY_MM_MAX_REPRICES_PER_S", 2)
+        self.max_reprices_per_s = _env_int("LATPOLY_MM_MAX_REPRICES_PER_S", 1)
         self.cycle_window_s = _env_float("LATPOLY_MM_CYCLE_WINDOW_S", 900.0)
 
 
