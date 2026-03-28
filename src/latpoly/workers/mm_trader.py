@@ -82,6 +82,9 @@ class SlotMMState:
     # Market open cooldown
     cycle_start_time: float = 0.0
 
+    # Post-fill settlement delay — don't SELL until 3s after last fill
+    last_fill_time: float = 0.0
+
     # Phase
     phase: str = "IDLE"  # IDLE | QUOTING | INVENTORY_SKEW | EXIT_MODE | HALT
 
@@ -120,6 +123,7 @@ class SlotMMState:
         self.total_fills = 0
         self.total_round_trips = 0
         self.cycle_start_time = time.time()
+        self.last_fill_time = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +324,7 @@ class MMTrader:
             return
 
         ss.total_fills += 1
+        ss.last_fill_time = time.time()
         self._session_fills += 1
         pnl = 0.0
 
@@ -421,27 +426,34 @@ class MMTrader:
             desired.bid_no_price, desired.bid_no_size,
         )
 
+        # Post-fill settlement delay: wait 3s after last fill before SELL
+        # Polymarket balance API is stale 1-3s after on-chain settlement
+        SELL_DELAY_S = 3.0
+        sell_ok = (now - ss.last_fill_time) >= SELL_DELAY_S
+
         # If we have YES inventory, place SELL YES
-        if ss.inventory_yes > 0 and desired.bid_no_size > 0:
-            # bid_no = ASK YES in disguise, but we can also place direct SELL YES
-            # for inventory we already hold
+        if ss.inventory_yes > 0 and desired.bid_no_size > 0 and sell_ok:
             ask_yes_price = round(1.0 - desired.bid_no_price, 2)
             await self._reconcile_one(
                 slot_id, "ask_yes",
                 ss.yes_token_id, "YES", "SELL",
                 ask_yes_price, min(desired.bid_no_size, ss.inventory_yes),
             )
+        elif "ask_yes" in ss.orders and not sell_ok:
+            pass  # Keep existing SELL, don't cancel during delay
         elif "ask_yes" in ss.orders:
             await self._cancel_order(slot_id, "ask_yes")
 
         # If we have NO inventory, place SELL NO
-        if ss.inventory_no > 0 and desired.bid_yes_size > 0:
+        if ss.inventory_no > 0 and desired.bid_yes_size > 0 and sell_ok:
             ask_no_price = round(1.0 - desired.bid_yes_price, 2)
             await self._reconcile_one(
                 slot_id, "ask_no",
                 ss.no_token_id, "NO", "SELL",
                 ask_no_price, min(desired.bid_yes_size, ss.inventory_no),
             )
+        elif "ask_no" in ss.orders and not sell_ok:
+            pass  # Keep existing SELL, don't cancel during delay
         elif "ask_no" in ss.orders:
             await self._cancel_order(slot_id, "ask_no")
 
