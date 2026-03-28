@@ -246,7 +246,9 @@ class InformedMMQuoteEngine(MMQuoteEngine):
         if time_phase == "reduce":
             spread *= 1.5
         elif time_phase == "exit":
-            spread *= 2.0
+            # EXIT: TIGHTEN spread to maximize fill probability
+            # We WANT to get filled to unwind inventory before expiry
+            spread *= 0.5
 
         # Clamp spread
         spread = _clamp(
@@ -279,23 +281,25 @@ class InformedMMQuoteEngine(MMQuoteEngine):
             ask_yes_price = round(bid_yes_price + TICK_SIZE, 2)
 
         # --- Step 9: Sell floor protection ---
-        # Never sell YES below avg_entry + min_profit
-        if avg_entry_yes > 0:
-            sell_floor_yes = round(avg_entry_yes + self.s5.min_profit_ticks * TICK_SIZE, 2)
-            if ask_yes_price < sell_floor_yes:
-                ask_yes_price = sell_floor_yes
+        # In EXIT/HALT: NO sell floor — must exit at any price
+        # Losing 50% is better than losing 100% at expiry
+        if time_phase not in ("exit", "halt"):
+            # Normal/reduce: never sell YES below avg_entry + min_profit
+            if avg_entry_yes > 0:
+                sell_floor_yes = round(avg_entry_yes + self.s5.min_profit_ticks * TICK_SIZE, 2)
+                if ask_yes_price < sell_floor_yes:
+                    ask_yes_price = sell_floor_yes
 
         # --- Step 10: Convert to BID NO ---
         bid_no_price = round(1.0 - ask_yes_price, 2)
 
-        # Never sell NO below avg_entry + min_profit (via bid_yes constraint)
-        if avg_entry_no > 0:
-            sell_floor_no = round(avg_entry_no + self.s5.min_profit_ticks * TICK_SIZE, 2)
-            # SELL NO = BUY YES at (1 - sell_no_price)
-            # bid_yes must be <= 1 - sell_floor_no for the exit to be profitable
-            max_bid_yes_for_no_exit = round(1.0 - sell_floor_no, 2)
-            if bid_yes_price > max_bid_yes_for_no_exit:
-                bid_yes_price = max_bid_yes_for_no_exit
+        # Sell floor for NO side (only in normal/reduce phase)
+        if time_phase not in ("exit", "halt"):
+            if avg_entry_no > 0:
+                sell_floor_no = round(avg_entry_no + self.s5.min_profit_ticks * TICK_SIZE, 2)
+                max_bid_yes_for_no_exit = round(1.0 - sell_floor_no, 2)
+                if bid_yes_price > max_bid_yes_for_no_exit:
+                    bid_yes_price = max_bid_yes_for_no_exit
 
         # --- Price extreme protection ---
         # Don't buy above $0.90 or below $0.18
@@ -390,6 +394,20 @@ class InformedMMQuoteEngine(MMQuoteEngine):
             bid_yes_size = self.p.min_maker_size
         if 0 < bid_no_size < self.p.min_maker_size:
             bid_no_size = self.p.min_maker_size
+
+        # FINAL hard cap — never overshoot max_inventory per side
+        room_yes = max(0, self.p.max_inventory - inventory_yes)
+        room_no = max(0, self.p.max_inventory - inventory_no)
+        if bid_yes_size > 0:
+            if room_yes < self.p.min_maker_size:
+                bid_yes_size = 0  # not enough room for a valid order
+            elif bid_yes_size > room_yes:
+                bid_yes_size = room_yes  # cap to available room
+        if bid_no_size > 0:
+            if room_no < self.p.min_maker_size:
+                bid_no_size = 0
+            elif bid_no_size > room_no:
+                bid_no_size = room_no
 
         return QuotePair(
             bid_yes_price=bid_yes_price,

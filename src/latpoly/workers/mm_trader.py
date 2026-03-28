@@ -44,6 +44,7 @@ log = logging.getLogger(__name__)
 
 MIN_ORDER_AGE_S = 2.0       # Don't check/cancel orders younger than this
 EXPIRY_HALT_S = 15.0        # Emergency halt near expiry
+MARKET_OPEN_COOLDOWN_S = 15.0  # Don't quote for first 15s of a new market
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +78,9 @@ class SlotMMState:
     inventory_no: int = 0
     avg_entry_yes: float = 0.0
     avg_entry_no: float = 0.0
+
+    # Market open cooldown
+    cycle_start_time: float = 0.0
 
     # Phase
     phase: str = "IDLE"  # IDLE | QUOTING | INVENTORY_SKEW | EXIT_MODE | HALT
@@ -115,6 +119,7 @@ class SlotMMState:
         self.realized_pnl = 0.0
         self.total_fills = 0
         self.total_round_trips = 0
+        self.cycle_start_time = time.time()
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +237,12 @@ class MMTrader:
             if ss.net_inventory != 0:
                 await self._emergency_flatten(slot_id, state)
             return
+
+        # --- Market open cooldown: don't quote in first 15s ---
+        if ss.cycle_start_time > 0:
+            elapsed_since_open = time.time() - ss.cycle_start_time
+            if elapsed_since_open < MARKET_OPEN_COOLDOWN_S:
+                return  # Let data stabilize before quoting
 
         # --- Check fills on existing orders ---
         await self._check_fills(slot_id)
@@ -632,16 +643,21 @@ class MMTrader:
     async def _emergency_flatten(
         self, slot_id: str, state: SharedState,
     ) -> None:
-        """HALT state: try to exit inventory via taker if profitable."""
+        """HALT state: exit ALL inventory at ANY price.
+
+        A partial loss is ALWAYS better than 100% loss at expiry.
+        Previously this only sold at profit — causing 11-share positions
+        to expire worthless every cycle.
+        """
         ss = self._slots[slot_id]
         pm = state.get_polymarket(slot_id)
         if pm is None:
             return
 
-        # Try to sell YES shares
+        # Try to sell YES shares — at ANY price (not just profit)
         if ss.inventory_yes > 0 and ss.yes_token_id:
             best_bid = pm.yes_best_bid
-            if best_bid is not None and best_bid > ss.avg_entry_yes:
+            if best_bid is not None and best_bid > 0.01:
                 try:
                     oid = await self._poly.place_market_sell(
                         ss.yes_token_id, best_bid, ss.inventory_yes,
@@ -652,8 +668,9 @@ class MMTrader:
                         self._session_pnl += pnl
                         log.info(
                             "[mm_trader][%s] EMERGENCY SELL YES: %d @ $%.2f "
-                            "pnl=$%+.4f",
+                            "pnl=$%+.4f (avg_entry=$%.2f)",
                             slot_id, ss.inventory_yes, best_bid, pnl,
+                            ss.avg_entry_yes,
                         )
                         ss.inventory_yes = 0
                         ss.avg_entry_yes = 0.0
@@ -663,10 +680,10 @@ class MMTrader:
                         slot_id, e,
                     )
 
-        # Try to sell NO shares
+        # Try to sell NO shares — at ANY price
         if ss.inventory_no > 0 and ss.no_token_id:
             best_bid = pm.no_best_bid
-            if best_bid is not None and best_bid > ss.avg_entry_no:
+            if best_bid is not None and best_bid > 0.01:
                 try:
                     oid = await self._poly.place_market_sell(
                         ss.no_token_id, best_bid, ss.inventory_no,
@@ -677,8 +694,9 @@ class MMTrader:
                         self._session_pnl += pnl
                         log.info(
                             "[mm_trader][%s] EMERGENCY SELL NO: %d @ $%.2f "
-                            "pnl=$%+.4f",
+                            "pnl=$%+.4f (avg_entry=$%.2f)",
                             slot_id, ss.inventory_no, best_bid, pnl,
+                            ss.avg_entry_no,
                         )
                         ss.inventory_no = 0
                         ss.avg_entry_no = 0.0

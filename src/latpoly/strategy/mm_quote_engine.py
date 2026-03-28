@@ -205,7 +205,7 @@ class MMQuoteEngine:
         if time_phase == "reduce":
             spread *= 1.5  # wider spread in reduce phase
         elif time_phase == "exit":
-            spread *= 2.0  # much wider in exit phase
+            spread *= 0.5  # TIGHTER in exit — want fills to unwind
 
         # Clamp spread
         spread = _clamp(
@@ -291,6 +291,20 @@ class MMQuoteEngine:
             bid_yes_size = self.p.min_maker_size
         if 0 < bid_no_size < self.p.min_maker_size:
             bid_no_size = self.p.min_maker_size
+
+        # FINAL hard cap — never overshoot max_inventory per side
+        room_yes = max(0, self.p.max_inventory - inventory_yes)
+        room_no = max(0, self.p.max_inventory - inventory_no)
+        if bid_yes_size > 0:
+            if room_yes < self.p.min_maker_size:
+                bid_yes_size = 0
+            elif bid_yes_size > room_yes:
+                bid_yes_size = room_yes
+        if bid_no_size > 0:
+            if room_no < self.p.min_maker_size:
+                bid_no_size = 0
+            elif bid_no_size > room_no:
+                bid_no_size = room_no
 
         return QuotePair(
             bid_yes_price=bid_yes_price,
