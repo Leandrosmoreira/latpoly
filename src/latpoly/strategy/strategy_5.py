@@ -306,7 +306,7 @@ class InformedMMQuoteEngine(MMQuoteEngine):
         # Low bound: Polymarket min order value is $1, so price*size >= $1
         # With size=6: $1/6 = $0.17, round up to $0.18 for safety
         EXTREME_LOW = 0.18
-        EXTREME_HIGH = 0.90
+        EXTREME_HIGH = 0.95
         bid_yes_price = round(_clamp(bid_yes_price, EXTREME_LOW, EXTREME_HIGH), 2)
         bid_no_price = round(_clamp(bid_no_price, EXTREME_LOW, EXTREME_HIGH), 2)
 

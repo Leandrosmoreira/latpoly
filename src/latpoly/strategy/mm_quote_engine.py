@@ -11,8 +11,8 @@ Computes optimal bid/ask quotes based on:
 
 Config (env vars):
   LATPOLY_MM_GAMMA              = 0.5     # risk aversion
-  LATPOLY_MM_BASE_SPREAD        = 2       # min spread in ticks
-  LATPOLY_MM_MAX_SPREAD         = 6       # max spread in ticks
+  LATPOLY_MM_BASE_SPREAD        = 1       # min spread in ticks
+  LATPOLY_MM_MAX_SPREAD         = 4       # max spread in ticks
   LATPOLY_MM_MAX_INVENTORY      = 8       # hard limit
   LATPOLY_MM_SOFT_INVENTORY     = 4       # skew threshold
   LATPOLY_MM_QUOTE_SIZE         = 6       # shares per side
@@ -102,8 +102,8 @@ class MMParams:
 
     def __init__(self) -> None:
         self.gamma = _env_float("LATPOLY_MM_GAMMA", 0.5)
-        self.base_spread_ticks = _env_int("LATPOLY_MM_BASE_SPREAD", 2)
-        self.max_spread_ticks = _env_int("LATPOLY_MM_MAX_SPREAD", 6)
+        self.base_spread_ticks = _env_int("LATPOLY_MM_BASE_SPREAD", 1)
+        self.max_spread_ticks = _env_int("LATPOLY_MM_MAX_SPREAD", 4)
         self.max_inventory = _env_int("LATPOLY_MM_MAX_INVENTORY", 8)
         self.soft_inventory = _env_int("LATPOLY_MM_SOFT_INVENTORY", 4)
         self.quote_size = _env_int("LATPOLY_MM_QUOTE_SIZE", 6)
@@ -233,7 +233,7 @@ class MMQuoteEngine:
         # Price extreme protection: Polymarket min order value is $1
         # price * size must be >= $1, so min price = ceil($1 / size)
         EXTREME_LOW = 0.18
-        EXTREME_HIGH = 0.90
+        EXTREME_HIGH = 0.95
         bid_yes_price = round(_clamp(bid_yes_price, EXTREME_LOW, EXTREME_HIGH), 2)
         bid_no_price = round(_clamp(bid_no_price, EXTREME_LOW, EXTREME_HIGH), 2)
 
