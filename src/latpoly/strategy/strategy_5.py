@@ -298,9 +298,10 @@ class InformedMMQuoteEngine(MMQuoteEngine):
                 bid_yes_price = max_bid_yes_for_no_exit
 
         # --- Price extreme protection ---
-        # Don't buy YES above $0.90 or below $0.10
-        # (near expiry, market goes to 0 or 1 and we'd get picked off)
-        EXTREME_LOW = 0.10
+        # Don't buy above $0.90 or below $0.18
+        # Low bound: Polymarket min order value is $1, so price*size >= $1
+        # With size=6: $1/6 = $0.17, round up to $0.18 for safety
+        EXTREME_LOW = 0.18
         EXTREME_HIGH = 0.90
         bid_yes_price = round(_clamp(bid_yes_price, EXTREME_LOW, EXTREME_HIGH), 2)
         bid_no_price = round(_clamp(bid_no_price, EXTREME_LOW, EXTREME_HIGH), 2)

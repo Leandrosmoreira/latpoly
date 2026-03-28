@@ -511,6 +511,10 @@ class MMTrader:
         if size < self._params.min_maker_size:
             return None
 
+        # Polymarket minimum order value is $1.00
+        if price * size < 1.0:
+            return None
+
         try:
             if direction == "BUY":
                 oid = await self._poly.place_limit_buy(token_id, price, size)

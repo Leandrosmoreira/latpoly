@@ -230,9 +230,12 @@ class MMQuoteEngine:
         # So bid_no_price = 1.00 - ask_yes_price
         bid_no_price = round(1.0 - ask_yes_price, 2)
 
-        # Clamp all prices
-        bid_yes_price = round(_clamp(bid_yes_price, MIN_PRICE, MAX_PRICE), 2)
-        bid_no_price = round(_clamp(bid_no_price, MIN_PRICE, MAX_PRICE), 2)
+        # Price extreme protection: Polymarket min order value is $1
+        # price * size must be >= $1, so min price = ceil($1 / size)
+        EXTREME_LOW = 0.18
+        EXTREME_HIGH = 0.90
+        bid_yes_price = round(_clamp(bid_yes_price, EXTREME_LOW, EXTREME_HIGH), 2)
+        bid_no_price = round(_clamp(bid_no_price, EXTREME_LOW, EXTREME_HIGH), 2)
 
         # --- Step 9: Compute sizes with inventory skew ---
         abs_inv = abs(net_inventory)
